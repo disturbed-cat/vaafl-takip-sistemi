@@ -11,10 +11,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
 
-/* ------------------------------------------------------------------ */
-/* SUPABASE BAĞLANTISI — kendi değerlerinizi buraya yazın               */
-/* Project Settings > API üzerinden alınır                              */
-/* ------------------------------------------------------------------ */
+
 
 const SUPABASE_URL = "https://ufqpguvxoksdeeansfpy.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVmcXBndXZ4b2tzZGVlYW5zZnB5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg5NzAxNTIsImV4cCI6MjEwNDU0NjE1Mn0.IRPVtNtLhI3StzKZEoejmSwlY2yMUpeSyfcI54fOsbM";
@@ -88,7 +85,7 @@ const sidebarStyle = {
 function GlobalStyles() {
   return (
     <style>{`
-      @keyframes fadeInUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes fadeInUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
       @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
       @keyframes scaleIn { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: scale(1); } }
       @keyframes spin { to { transform: rotate(360deg); } }
@@ -125,6 +122,13 @@ function GlobalStyles() {
       ::-webkit-scrollbar { width: 8px; height: 8px; }
       ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 8px; }
       ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.25); }
+            .print-only { display: none; }
+      @media print {
+        @page { size: A4; margin: 12mm; }
+        body * { visibility: hidden; }
+        .print-only, .print-only * { visibility: visible; }
+        .print-only { display: block !important; position: absolute; top: 0; left: 0; width: 100%; }
+      }
     `}</style>
   );
 }
@@ -462,10 +466,14 @@ function ModalShell({ title, onClose, children, width = 480 }) {
 }
 
 function AddUserModal({ onClose, onSubmit, classes, coaches, students, defaultRole = "student" }) {
+  const staffMode = defaultRole === "teacher";
+  const roleOptions = staffMode
+    ? [["teacher", "Öğretmen"], ["counselor", "Okul Rehber Öğretmeni"]]
+    : [["student", "Öğrenci"], ["parent", "Veli"]];
   const [form, setForm] = useState({
-    name: "", role: defaultRole,
-    classId: classes[0]?.id || "", coachId: "", childId: students[0]?.id || "",
-    subjects: [MAIN_SUBJECTS[0]],
+    name: "", role: staffMode ? "teacher" : "student",
+    classId: staffMode ? "" : (classes[0]?.id || ""), coachId: "", childId: students[0]?.id || "",
+    subjects: [MAIN_SUBJECTS[0]], isCoach: false,
   });
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState(null);
@@ -488,7 +496,11 @@ function AddUserModal({ onClose, onSubmit, classes, coaches, students, defaultRo
     if (form.role === "parent" && !form.childId) return;
     setSaving(true);
     const payload = { name: form.name.trim(), role: form.role };
-    if (form.role === "teacher") { payload.classId = form.classId || null; payload.subjects = form.subjects; }
+    if (form.role === "teacher") {
+      payload.subjects = form.subjects;
+      if (form.isCoach) { payload.role = "coach"; payload.classId = null; }
+      else payload.classId = form.classId || null;
+    }
     if (form.role === "student") { payload.classId = form.classId || null; payload.coachId = form.coachId || null; }
     if (form.role === "parent") payload.childId = form.childId || null;
     const res = await onSubmit(payload);
@@ -520,20 +532,33 @@ function AddUserModal({ onClose, onSubmit, classes, coaches, students, defaultRo
   }
 
   return (
-    <ModalShell title="Yeni Kullanıcı Ekle" onClose={onClose}>
+    <ModalShell title={staffMode ? "Yeni Öğretmen Ekle" : "Yeni Kullanıcı Ekle"} onClose={onClose}>
       <FormSelect label="Rol" value={form.role} onChange={update("role")}>
-        {Object.entries(ROLE_CONFIG).filter(([key]) => key !== "admin").map(([key, cfg]) => (
-          <option key={key} value={key}>{cfg.label}</option>
-        ))}
+        {roleOptions.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
       </FormSelect>
       <FormInput label="Ad Soyad" placeholder="Örn. Ahmet Yıldız" value={form.name} onChange={update("name")} />
 
       {form.role === "teacher" && (
         <>
-          <FormSelect label="Sorumlu Olacağı Sınıf (opsiyonel)" value={form.classId} onChange={update("classId")}>
-            <option value="">Atanmadı</option>
-            {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </FormSelect>
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="block text-xs font-medium" style={{ color: COLORS.textSecondary }}>Sorumlu Olacağı Sınıf (opsiyonel)</span>
+              <label className="flex items-center gap-1.5 text-xs font-semibold cursor-pointer" style={{ color: COLORS.text }}>
+                <input type="checkbox" checked={form.isCoach} onChange={(e) => setForm({ ...form, isCoach: e.target.checked, classId: e.target.checked ? "" : form.classId })} />
+                Koç
+              </label>
+            </div>
+            <select
+              value={form.classId}
+              onChange={update("classId")}
+              disabled={form.isCoach}
+              className="w-full px-3.5 py-2.5 rounded-xl text-sm outline-none"
+              style={{ border: "1px solid rgba(0,0,0,0.1)", background: form.isCoach ? "#EDEDED" : "#FAFAFA", color: COLORS.text, opacity: form.isCoach ? 0.6 : 1 }}
+            >
+              <option value="">Atanmadı</option>
+              {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
           <div className="mb-4">
             <span className="block text-xs font-medium mb-1.5" style={{ color: COLORS.textSecondary }}>Branş</span>
             {form.subjects.map((subj, i) => (
@@ -1095,6 +1120,18 @@ function UsersTab({ users, classes, onBulkAddClick, onSingleAddClick, onDelete, 
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
   const [confirmId, setConfirmId] = useState(null);
+    const [atBottom, setAtBottom] = useState(false);
+  useEffect(() => {
+    const onScroll = () => {
+      setAtBottom(window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80);
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll);
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  const scrollToggle = () => {
+    window.scrollTo({ top: atBottom ? 0 : document.documentElement.scrollHeight, behavior: "smooth" });
+  };
 
   const filtered = users.filter((u) => {
     if (u.role === "admin") return false;
@@ -1118,9 +1155,6 @@ function UsersTab({ users, classes, onBulkAddClick, onSingleAddClick, onDelete, 
         </button>
         <button onClick={() => onSingleAddClick("teacher")} className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.indigo }}>
           <Plus size={16} /> Öğretmen Ekle
-        </button>
-        <button onClick={() => onBulkAddClick("coach")} className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.teal }}>
-          <Plus size={16} /> Koç Ekle
         </button>
         <button onClick={() => onSingleAddClick("student")} className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-sm font-medium" style={{ color: COLORS.textSecondary, border: "1px solid rgba(0,0,0,0.1)" }}>
           <Plus size={16} /> Diğer / Tekil Ekle
@@ -1171,8 +1205,17 @@ function UsersTab({ users, classes, onBulkAddClick, onSingleAddClick, onDelete, 
               </button>
             )}
           </div>
-        ))}
+                ))}
       </div>
+
+      <button
+        onClick={scrollToggle}
+        className="fixed bottom-6 right-6 z-30 flex items-center gap-2 px-4 py-3 rounded-full text-xs font-semibold text-white lift-hover"
+        style={{ background: COLORS.text, boxShadow: "0 8px 24px rgba(0,0,0,0.25)", fontFamily: FONT }}
+      >
+        <ChevronDown size={16} style={{ transform: atBottom ? "rotate(180deg)" : "none", transition: "transform 0.2s" }} />
+        {atBottom ? "Yukarı çık" : "Aşağı in"}
+      </button>
     </div>
   );
 }
@@ -3434,8 +3477,7 @@ export default function App() {
   const students = users.filter((u) => u.role === "student");
 
   if (currentUser.role === "admin") {
-    const ADMIN_TITLES = { overview: "Genel Bakış", users: "Kullanıcılar", classes: "Sınıflar", coaching: "Koç Atamaları", credentials: "Şifreler", appointments: "Randevular" };
-    const seatingClass = seatingClassId ? classes.find((c) => c.id === seatingClassId) : null;
+    const ADMIN_TITLES = { overview: "Genel Bakış", users: "Kullanıcılar", classes: "Sınıflar", coaching: "Koç Atamaları", credentials: "Şifreler", appointments: "Randevular", schedule: "Ders Programı" };    const seatingClass = seatingClassId ? classes.find((c) => c.id === seatingClassId) : null;
     const seatingClassStudents = seatingClass ? students.filter((s) => s.classId === seatingClass.id) : [];
     const adminUpcomingCount = appointments.filter((a) => a.recipientType === "admin" && a.date >= todayStr()).length;
     const adminNavItems = [...ADMIN_NAV, { id: "appointments", label: "Randevular", icon: CalendarDays, badge: adminUpcomingCount }];
@@ -3458,15 +3500,26 @@ export default function App() {
                 </div>
               </>
             )}
-            {adminActive === "users" && <UsersTab users={users} classes={classes} onBulkAddClick={setBulkAddRole} onSingleAddClick={() => setShowUserModal(true)} onDelete={deleteUser} onEditStudentClick={setEditingStudent} />}
+            {adminActive === "users" && <UsersTab users={users} classes={classes} onBulkAddClick={setBulkAddRole} onSingleAddClick={setShowUserModal} onDelete={deleteUser} onEditStudentClick={setEditingStudent} />}
             {adminActive === "classes" && <ClassesTab classes={classes} users={users} onAddClick={() => setShowClassModal(true)} onSeatingClick={setSeatingClassId} onEditClick={setEditingClass} />}
             {adminActive === "coaching" && <CoachingTab users={users} classes={classes} onAssign={assignCoach} onUnassign={unassignCoach} />}
             {adminActive === "credentials" && <CredentialsTab users={users} classes={classes} credentials={credentials} onPrint={setPrintData} />}
             {adminActive === "appointments" && <AdminAppointmentsTab appointments={appointments} users={users} />}
+                        {adminActive === "schedule" && (
+              <ScheduleTab
+                teachers={[...teachers, ...coaches]}
+                teacherSubjects={teacherSubjects}
+                scheduleSlots={scheduleSlots}
+                classes={classes}
+                users={users}
+                onSetSlot={setScheduleSlot}
+                onClearSlot={clearScheduleSlot}
+                onClearDay={clearScheduleDay}
+              />
+            )}
           </Shell>
         </div>
-        {showUserModal && <AddUserModal onClose={() => setShowUserModal(false)} onSubmit={addUser} classes={classes} coaches={coaches} students={students} />}
-        {showClassModal && <AddClassModal onClose={() => setShowClassModal(false)} onSave={addClass} teachers={teachers} />}
+        {showUserModal && <AddUserModal onClose={() => setShowUserModal(null)} onSubmit={addUser} classes={classes} coaches={coaches} students={students} defaultRole={showUserModal} />}        {showClassModal && <AddClassModal onClose={() => setShowClassModal(false)} onSave={addClass} teachers={teachers} />}
         {bulkAddRole && <BulkAddModal role={bulkAddRole} classes={classes} onClose={() => setBulkAddRole(null)} onSubmit={bulkAddUsers} />}
         {editingClass && <EditClassModal cls={editingClass} onClose={() => setEditingClass(null)} onSave={editClass} teachers={teachers} />}
         {editingStudent && <EditStudentModal student={editingStudent} onClose={() => setEditingStudent(null)} onSave={editStudent} classes={classes} coaches={coaches} />}
