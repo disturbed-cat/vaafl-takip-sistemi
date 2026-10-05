@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { createPortal } from "react-dom";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
@@ -125,9 +126,8 @@ function GlobalStyles() {
             .print-only { display: none; }
       @media print {
         @page { size: A4; margin: 12mm; }
-        body * { visibility: hidden; }
-        .print-only, .print-only * { visibility: visible; }
-        .print-only { display: block !important; position: absolute; top: 0; left: 0; width: 100%; }
+        body > *:not(.print-only) { display: none !important; }
+        .print-only { display: block !important; }
       }
     `}</style>
   );
@@ -1120,15 +1120,26 @@ function UsersTab({ users, classes, onBulkAddClick, onSingleAddClick, onDelete, 
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
   const [confirmId, setConfirmId] = useState(null);
-    const [atBottom, setAtBottom] = useState(false);
+    const [scrollInfo, setScrollInfo] = useState({ atBottom: false, scrollable: false });
   useEffect(() => {
-    const onScroll = () => {
-      setAtBottom(window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80);
+    const update = () => {
+      const doc = document.documentElement;
+      const scrollable = doc.scrollHeight > window.innerHeight + 120;
+      const atBottom = window.innerHeight + window.scrollY >= doc.scrollHeight - 80;
+      setScrollInfo((prev) => (prev.scrollable === scrollable && prev.atBottom === atBottom ? prev : { scrollable, atBottom }));
     };
-    onScroll();
-    window.addEventListener("scroll", onScroll);
-    return () => window.removeEventListener("scroll", onScroll);
+    update();
+    window.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
+    const ro = new ResizeObserver(update);
+    ro.observe(document.body);
+    return () => {
+      window.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      ro.disconnect();
+    };
   }, []);
+  const { atBottom, scrollable } = scrollInfo;
   const scrollToggle = () => {
     window.scrollTo({ top: atBottom ? 0 : document.documentElement.scrollHeight, behavior: "smooth" });
   };
@@ -1208,14 +1219,19 @@ function UsersTab({ users, classes, onBulkAddClick, onSingleAddClick, onDelete, 
                 ))}
       </div>
 
-      <button
-        onClick={scrollToggle}
-        className="fixed bottom-6 right-6 z-30 flex items-center gap-2 px-4 py-3 rounded-full text-xs font-semibold text-white lift-hover"
-        style={{ background: COLORS.text, boxShadow: "0 8px 24px rgba(0,0,0,0.25)", fontFamily: FONT }}
-      >
-        <ChevronDown size={16} style={{ transform: atBottom ? "rotate(180deg)" : "none", transition: "transform 0.2s" }} />
-        {atBottom ? "Yukarı çık" : "Aşağı in"}
-      </button>
+            {scrollable && createPortal(
+        <div className="fixed bottom-6 left-0 right-0 md:left-64 z-30 flex justify-center pointer-events-none">
+          <button
+            onClick={scrollToggle}
+            className="pointer-events-auto flex items-center gap-2 px-4 py-2.5 rounded-full text-xs font-semibold text-white lift-hover"
+            style={{ background: COLORS.text, boxShadow: "0 8px 24px rgba(0,0,0,0.25)", fontFamily: FONT }}
+          >
+            <ChevronDown size={16} style={{ transform: atBottom ? "rotate(180deg)" : "none", transition: "transform 0.2s" }} />
+            {atBottom ? "Yukarı çık" : "Aşağı in"}
+          </button>
+        </div>,
+        document.body
+      )}
     </div>
   );
 }
@@ -1988,7 +2004,7 @@ function AnnouncementsManageSection({ title, announcements, onCreateClick, onOpe
 function PrintableCredentials({ data }) {
   if (!data) return null;
   const cellStyle = { border: "1px solid #000", padding: "6px 10px", textAlign: "left", fontSize: 13 };
-  return (
+  return createPortal(
     <div className="print-only" style={{ padding: 24, fontFamily: FONT }}>
       <h1 style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>{data.title}</h1>
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -2009,7 +2025,8 @@ function PrintableCredentials({ data }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -2032,7 +2049,7 @@ function PrintableSeatingChart({ data }) {
 
   const cellStyle = { border: "1.5px solid #333", borderRadius: 6, padding: "8px 4px", textAlign: "center", minHeight: 44, display: "flex", alignItems: "center", justifyContent: "center", wordBreak: "break-word", lineHeight: 1.2, overflow: "hidden" };
 
-  return (
+  return createPortal(
     <div className="print-only" style={{ padding: 28, fontFamily: FONT }}>
       <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 2 }}>{className} Sınıfı Oturma Düzeni</h1>
       <p style={{ fontSize: 11, color: "#666", marginBottom: 18 }}>{formatDateLong(todayStr())}</p>
@@ -2065,10 +2082,10 @@ function PrintableSeatingChart({ data }) {
           <p style={{ fontSize: 12 }}>{unassigned.map((s) => s.name).join(", ")}</p>
         </div>
       )}
-    </div>
+    </div>,
+    document.body
   );
 }
-
 function emptySeatingChart() {
   const desks = [];
   let id = 1;
