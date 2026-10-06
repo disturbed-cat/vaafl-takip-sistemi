@@ -2948,17 +2948,225 @@ function ExamEditor({ examId, currentUser, onBack }) {
   );
 }
 
-function ExamsTab({ currentUser }) {
+const toLocalInput = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+function assignmentState(row) {
+  if (!row.is_open) return { label: "Kapalı", color: COLORS.textSecondary, bg: "rgba(0,0,0,0.06)" };
+  const now = Date.now();
+  const opens = row.opens_at ? new Date(row.opens_at).getTime() : null;
+  const closes = row.closes_at ? new Date(row.closes_at).getTime() : null;
+  if (opens && now < opens) return { label: "Başlamayı bekliyor", color: COLORS.orange, bg: `${COLORS.orange}18` };
+  if (closes && now >= closes) return { label: "Süresi bitti", color: COLORS.red, bg: `${COLORS.red}15` };
+  return { label: "Açık", color: COLORS.green, bg: `${COLORS.green}18` };
+}
+
+function AssignRow({ cls, row, busy, onAssign, onToggle, onSaveSettings, onRemove }) {
+  const [opens, setOpens] = useState(toLocalInput(row?.opens_at));
+  const [closes, setClosesState] = useState(toLocalInput(row?.closes_at));
+  const [duration, setDuration] = useState(row?.duration_minutes ?? "");
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  if (!row) {
+    return (
+      <div className="flex items-center justify-between gap-3 p-4 rounded-2xl" style={{ background: "rgba(0,0,0,0.02)" }}>
+        <span className="text-sm font-semibold" style={{ color: COLORS.text }}>{cls.name}</span>
+        <button onClick={() => onAssign(cls.id)} disabled={busy} className="px-3.5 py-1.5 rounded-xl text-xs font-semibold" style={{ color: COLORS.blue, background: `${COLORS.blue}12`, opacity: busy ? 0.5 : 1 }}>
+          Ata
+        </button>
+      </div>
+    );
+  }
+
+  const st = assignmentState(row);
+  const dirty = opens !== toLocalInput(row.opens_at) || closes !== toLocalInput(row.closes_at) || String(duration) !== String(row.duration_minutes ?? "");
+
+  const save = async () => {
+    setMsg(null);
+    const dur = duration === "" ? null : Number(duration);
+    if (dur !== null && (!dur || dur < 1 || dur > 600)) return setMsg({ ok: false, text: "Süre 1 ile 600 dakika arasında olmalı." });
+    const o = opens ? new Date(opens) : null;
+    const c = closes ? new Date(closes) : null;
+    if ((o && isNaN(o.getTime())) || (c && isNaN(c.getTime()))) return setMsg({ ok: false, text: "Tarih geçersiz." });
+    if (o && c && c <= o) return setMsg({ ok: false, text: "Bitiş zamanı başlangıçtan sonra olmalı." });
+    const err = await onSaveSettings(row, { opens_at: o ? o.toISOString() : null, closes_at: c ? c.toISOString() : null, duration_minutes: dur });
+    setMsg(err ? { ok: false, text: err } : { ok: true, text: "Kaydedildi." });
+  };
+
+  return (
+    <div className="p-4 rounded-2xl" style={{ background: "rgba(0,0,0,0.02)", border: row.is_open ? `1px solid ${COLORS.green}40` : "1px solid transparent" }}>
+      <div className="flex items-center gap-3">
+        <span className="text-sm font-semibold" style={{ color: COLORS.text }}>{cls.name}</span>
+        <span className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: st.bg, color: st.color }}>{st.label}</span>
+        <span className="flex-1" />
+        <span className="text-xs" style={{ color: COLORS.textSecondary }}>{row.is_open ? "Açık" : "Kapalı"}</span>
+        <button
+          onClick={() => onToggle(row)}
+          disabled={busy}
+          title={row.is_open ? "Kapat" : "Aç"}
+          className="relative rounded-full flex-shrink-0"
+          style={{ width: 44, height: 24, background: row.is_open ? COLORS.green : "rgba(0,0,0,0.18)", opacity: busy ? 0.6 : 1 }}
+        >
+          <span className="absolute rounded-full bg-white" style={{ width: 20, height: 20, top: 2, left: row.is_open ? 22 : 2, transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.3)" }} />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+        <label className="block">
+          <span className="block text-xs font-medium mb-1" style={{ color: COLORS.textSecondary }}>Başlangıç (opsiyonel)</span>
+          <input type="datetime-local" value={opens} onChange={(e) => setOpens(e.target.value)} className="w-full px-3 py-2 rounded-xl text-xs outline-none" style={{ border: "1px solid rgba(0,0,0,0.1)", background: "#fff", color: COLORS.text }} />
+        </label>
+        <label className="block">
+          <span className="block text-xs font-medium mb-1" style={{ color: COLORS.textSecondary }}>Bitiş (opsiyonel)</span>
+          <input type="datetime-local" value={closes} onChange={(e) => setClosesState(e.target.value)} className="w-full px-3 py-2 rounded-xl text-xs outline-none" style={{ border: "1px solid rgba(0,0,0,0.1)", background: "#fff", color: COLORS.text }} />
+        </label>
+        <label className="block">
+          <span className="block text-xs font-medium mb-1" style={{ color: COLORS.textSecondary }}>Süre (dk, boşsa sınav süresi)</span>
+          <input type="number" min="1" max="600" value={duration} onChange={(e) => setDuration(e.target.value)} placeholder="Varsayılan" className="w-full px-3 py-2 rounded-xl text-xs outline-none" style={{ border: "1px solid rgba(0,0,0,0.1)", background: "#fff", color: COLORS.text }} />
+        </label>
+      </div>
+
+      {msg && <p className="text-xs mt-2" style={{ color: msg.ok ? COLORS.green : COLORS.red }}>{msg.text}</p>}
+
+      <div className="flex items-center gap-2 mt-3">
+        {dirty && (
+          <button onClick={save} className="px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.blue }}>Ayarları Kaydet</button>
+        )}
+        <span className="flex-1" />
+        {confirmRemove ? (
+          <div className="flex items-center gap-2">
+            <span className="text-xs" style={{ color: COLORS.red }}>Bu sınıfın sonuçları da silinir.</span>
+            <button onClick={() => onRemove(row)} className="text-xs font-semibold px-3 py-1.5 rounded-lg text-white" style={{ background: COLORS.red }}>Kaldır</button>
+            <button onClick={() => setConfirmRemove(false)} className="text-xs font-medium px-2 py-1.5 rounded-lg" style={{ color: COLORS.textSecondary }}>Vazgeç</button>
+          </div>
+        ) : (
+          <button onClick={() => setConfirmRemove(true)} className="text-xs font-medium px-2.5 py-1.5 rounded-lg" style={{ color: COLORS.textSecondary }}>Atamayı kaldır</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AssignExamModal({ exam, questionCount, classes, onClose }) {
+  const [rows, setRows] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState("");
+
+  const load = async () => {
+    const { data, error: err } = await supabase.from("exam_assignments").select("*").eq("exam_id", exam.id);
+    if (err) setError("Atamalar yüklenemedi: " + err.message);
+    else {
+      const map = {};
+      (data || []).forEach((r) => { map[r.class_id] = r; });
+      setRows(map);
+      setError("");
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const assign = async (classId) => {
+    setBusyId(classId);
+    const { error: err } = await supabase.from("exam_assignments").insert({ exam_id: exam.id, class_id: classId });
+    setBusyId(null);
+    if (err) setError("Atanamadı: " + err.message);
+    await load();
+  };
+
+  const toggleOpen = async (row) => {
+    setBusyId(row.class_id);
+    const { error: err } = await supabase.from("exam_assignments").update({ is_open: !row.is_open }).eq("id", row.id);
+    setBusyId(null);
+    if (err) setError("Güncellenemedi: " + err.message);
+    await load();
+  };
+
+  const saveSettings = async (row, patch) => {
+    const { error: err } = await supabase.from("exam_assignments").update(patch).eq("id", row.id);
+    if (err) return "Kaydedilemedi: " + err.message;
+    await load();
+    return null;
+  };
+
+  const removeAssignment = async (row) => {
+    const { error: err } = await supabase.from("exam_assignments").delete().eq("id", row.id);
+    if (err) setError("Kaldırılamadı: " + err.message);
+    await load();
+  };
+
+  const sorted = [...classes].sort((a, b) => a.name.localeCompare(b.name, "tr"));
+
+  return (
+    <ModalShell title={`${exam.title} — Sınıflara Ata`} onClose={onClose} width={700}>
+      {questionCount === 0 && (
+        <p className="text-xs mb-3 px-3 py-2 rounded-xl" style={{ background: `${COLORS.orange}18`, color: COLORS.orange }}>
+          Bu sınavda henüz soru yok. Soru eklenene kadar öğrenciler sınavı başlatamaz.
+        </p>
+      )}
+      <p className="text-xs mb-4" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>
+        Sınıfı atayıp <b>Açık</b> yaptığınızda öğrenciler sınavı kendi hesaplarından başlatabilir. Başlangıç/bitiş zamanı ve süre isteğe bağlıdır.
+        Sınavı kapatsanız bile zaten başlamış öğrenciler kendi süreleri bitene kadar devam eder.
+      </p>
+
+      {error && <p className="text-xs mb-3" style={{ color: COLORS.red }}>{error}</p>}
+      {loading && <div className="py-8 text-center text-sm" style={{ color: COLORS.textSecondary }}>Yükleniyor...</div>}
+      {!loading && sorted.length === 0 && <p className="text-sm py-6 text-center" style={{ color: COLORS.textSecondary }}>Henüz sınıf yok.</p>}
+
+      <div className="flex flex-col gap-2.5">
+        {!loading && sorted.map((c) => (
+          <AssignRow
+            key={`${c.id}-${rows[c.id]?.id || "none"}`}
+            cls={c}
+            row={rows[c.id]}
+            busy={busyId === c.id}
+            onAssign={assign}
+            onToggle={toggleOpen}
+            onSaveSettings={saveSettings}
+            onRemove={removeAssignment}
+          />
+        ))}
+      </div>
+
+      <button onClick={onClose} className="w-full mt-5 py-3 rounded-xl text-sm font-semibold" style={{ color: COLORS.textSecondary, background: "rgba(0,0,0,0.05)" }}>Kapat</button>
+    </ModalShell>
+  );
+}
+
+function ExamsTab({ currentUser, classes }) {
   const [exams, setExams] = useState([]);
+  const [assignmentsByExam, setAssignmentsByExam] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [editingId, setEditingId] = useState(undefined);
   const [confirmId, setConfirmId] = useState(null);
+  const [assigning, setAssigning] = useState(null);
+
+  const classNameOf = (id) => classes.find((c) => c.id === id)?.name || "?";
 
   const loadList = async () => {
     const { data, error: err } = await supabase.from("exams").select("*, exam_questions(count)").order("created_at", { ascending: false });
-    if (err) setError("Sınavlar yüklenemedi: " + err.message);
-    else { setExams(data || []); setError(""); }
+    if (err) {
+      setError("Sınavlar yüklenemedi: " + err.message);
+    } else {
+      setExams(data || []);
+      setError("");
+      const ids = (data || []).map((e) => e.id);
+      if (ids.length) {
+        const { data: asg } = await supabase.from("exam_assignments").select("exam_id, class_id, is_open, opens_at, closes_at").in("exam_id", ids);
+        const map = {};
+        (asg || []).forEach((a) => { (map[a.exam_id] = map[a.exam_id] || []).push(a); });
+        setAssignmentsByExam(map);
+      } else {
+        setAssignmentsByExam({});
+      }
+    }
     setLoading(false);
   };
 
@@ -2993,6 +3201,7 @@ function ExamsTab({ currentUser }) {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {exams.map((ex) => {
           const qCount = ex.exam_questions?.[0]?.count ?? 0;
+          const asg = assignmentsByExam[ex.id] || [];
           return (
             <div key={ex.id} className="rounded-2xl p-5 card-hover" style={glassCard}>
               <div className="flex items-start justify-between gap-3 mb-3">
@@ -3004,10 +3213,25 @@ function ExamsTab({ currentUser }) {
                   <BookOpen size={18} color={COLORS.blue} />
                 </div>
               </div>
-              <div className="flex gap-2 mb-4">
+              <div className="flex gap-2 mb-3">
                 <span className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: `${COLORS.indigo}15`, color: COLORS.indigo }}>{qCount} soru</span>
                 <span className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: `${COLORS.teal}15`, color: COLORS.teal }}>{ex.duration_minutes} dk</span>
               </div>
+              {asg.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5 mb-4">
+                  {asg.map((a) => {
+                    const st = assignmentState(a);
+                    return (
+                      <span key={a.class_id} className="text-xs font-medium px-2 py-0.5 rounded-full inline-flex items-center gap-1.5" style={{ background: st.bg, color: st.color }}>
+                        <span style={{ width: 6, height: 6, borderRadius: "50%", background: st.color, display: "inline-block" }} />
+                        {classNameOf(a.class_id)} · {st.label}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-xs mb-4" style={{ color: COLORS.textSecondary }}>Henüz bir sınıfa atanmadı</p>
+              )}
               {confirmId === ex.id ? (
                 <div className="flex items-center gap-2">
                   <span className="text-xs flex-1" style={{ color: COLORS.red }}>Sınav, soruları ve sonuçları silinecek. Emin misiniz?</span>
@@ -3016,6 +3240,9 @@ function ExamsTab({ currentUser }) {
                 </div>
               ) : (
                 <div className="flex gap-2">
+                  <button onClick={() => setAssigning(ex)} className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.blue }}>
+                    Sınıflara Ata
+                  </button>
                   <button onClick={() => setEditingId(ex.id)} className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-semibold" style={{ color: COLORS.blue, background: `${COLORS.blue}12` }}>
                     <Pencil size={14} /> Düzenle
                   </button>
@@ -3028,6 +3255,15 @@ function ExamsTab({ currentUser }) {
           );
         })}
       </div>
+
+      {assigning && (
+        <AssignExamModal
+          exam={assigning}
+          questionCount={assigning.exam_questions?.[0]?.count ?? 0}
+          classes={classes}
+          onClose={() => { setAssigning(null); loadList(); }}
+        />
+      )}
     </div>
   );
 }
@@ -3950,7 +4186,7 @@ export default function App() {
           )}
           {tcActive === "targets" && <TargetsTab myTargets={myTargets} studentTargets={studentTargets} users={users} onAddClick={() => setShowTargetModal(true)} />}
           {tcActive === "verify" && <VerificationTab myTargets={myTargets} studentTargets={studentTargets} users={users} onVerify={verifyStudentTarget} />}
-          {tcActive === "exams" && <ExamsTab currentUser={currentUser} />}
+          {tcActive === "exams" && <ExamsTab currentUser={currentUser} classes={classes} />}
           {tcActive === "seating" && isTeacher && (
             myClass ? (
               <SeatingChartBoard cls={myClass} students={pool} initialChart={myClass.seatingChart} onSave={saveSeatingChart} onPrint={setPrintSeatingChart} />
