@@ -411,26 +411,24 @@ function ModalShell({ title, onClose, children, width = 480 }) {
       onClick={onClose}
     >
       <div
-        className="w-full rounded-3xl p-6 modal-content-anim"
-        style={{ ...glassCard, background: "rgba(255,255,255,0.97)", maxWidth: width, maxHeight: "90vh", overflowY: "auto" }}
+        className="w-full rounded-3xl modal-content-anim flex flex-col overflow-hidden"
+        style={{ ...glassCard, background: "rgba(255,255,255,0.97)", maxWidth: width, maxHeight: "90vh" }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div
-          className="flex items-center justify-between sticky top-0 z-10 -mx-6 -mt-6 px-6 pt-6 pb-4 mb-1"
-          style={{ background: "rgba(255,255,255,0.97)" }}
-        >
+        <div className="flex items-center justify-between px-6 pt-6 pb-4 flex-shrink-0">
           <h3 className="text-lg font-semibold" style={{ color: COLORS.text }}>{title}</h3>
           <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-gray-100 transition">
             <X size={18} color={COLORS.textSecondary} />
           </button>
         </div>
-        {children}
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-6">
+          {children}
+        </div>
       </div>
     </div>,
     document.body
   );
 }
-
 function AddUserModal({ onClose, onSubmit, classes, coaches, students, defaultRole = "student" }) {
   const staffMode = defaultRole === "teacher";
   const roleOptions = staffMode
@@ -4452,7 +4450,7 @@ const importKeySummary = (q) => {
 };
 
 function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImported }) {
-  const [tab, setTab] = useState("text");
+  const [tab, setTab] = useState("ai");
   const [raw, setRaw] = useState("");
   const [fileName, setFileName] = useState("");
   const [points, setPoints] = useState(1);
@@ -4461,6 +4459,15 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
   const [parsed, setParsed] = useState(null);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState("");
+  const [aiText, setAiText] = useState("");
+  const [aiCounts, setAiCounts] = useState({ mc: 10, tf: 0, fill: 0, open: 0 });
+  const [aiLang, setAiLang] = useState("auto");
+  const [aiLevel, setAiLevel] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiMade, setAiMade] = useState(false);
+
+  const getDefaults = () => ({ points: Number(String(points).replace(",", ".")), openPoints: Number(String(openPoints).replace(",", ".")) });
+  const defaultsOk = (d) => !(isNaN(d.points) || d.points < 0 || isNaN(d.openPoints) || d.openPoints < 0);
 
   const handleFile = async (e) => {
     const f = e.target.files?.[0];
@@ -4479,12 +4486,40 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
 
   const check = () => {
     setError("");
-    const defaults = { points: Number(String(points).replace(",", ".")), openPoints: Number(String(openPoints).replace(",", ".")) };
-    if (isNaN(defaults.points) || defaults.points < 0 || isNaN(defaults.openPoints) || defaults.openPoints < 0) {
-      return setError("Puan değerleri 0 veya daha büyük bir sayı olmalı.");
-    }
+    const defaults = getDefaults();
+    if (!defaultsOk(defaults)) return setError("Puan değerleri 0 veya daha büyük bir sayı olmalı.");
     if (!raw.trim()) return setError(tab === "json" ? "Önce bir JSON dosyası seçin ya da JSON'u yapıştırın." : "Önce soruları yapıştırın.");
+    setAiMade(false);
     setParsed(tab === "json" ? parseImportJson(raw, defaults) : parseImportText(raw, defaults));
+  };
+
+  const generateAi = async () => {
+    setError("");
+    const defaults = getDefaults();
+    if (!defaultsOk(defaults)) return setError("Puan değerleri 0 veya daha büyük bir sayı olmalı.");
+    const counts = { mc: Number(aiCounts.mc) || 0, tf: Number(aiCounts.tf) || 0, fill: Number(aiCounts.fill) || 0, open: Number(aiCounts.open) || 0 };
+    const sum = counts.mc + counts.tf + counts.fill + counts.open;
+    if (aiText.trim().length < 100) return setError("Kaynak metin çok kısa. Soru üretmek için daha uzun bir metin yapıştırın.");
+    if (aiText.length > 60000) return setError("Kaynak metin çok uzun (en fazla 60.000 karakter).");
+    if (sum < 1) return setError("En az bir soru istemelisiniz.");
+    if (sum > 40) return setError("Tek seferde en fazla 40 soru istenebilir.");
+
+    setAiLoading(true);
+    const { data, error: err } = await supabase.functions.invoke("ai-exam-import", {
+      body: { text: aiText, counts, language: aiLang, level: aiLevel },
+    });
+    setAiLoading(false);
+    if (err) {
+      let msg = "Yapay zeka isteği başarısız oldu. Biraz sonra tekrar deneyin.";
+      try {
+        const b = await err.context.json();
+        if (b?.error) msg = b.error;
+      } catch (e) {}
+      return setError(msg);
+    }
+    if (data?.error) return setError(data.error);
+    setAiMade(true);
+    setParsed(parseImportJson(JSON.stringify({ questions: data.questions }), defaults));
   };
 
   const doImport = async () => {
@@ -4529,16 +4564,18 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
 
   const counts = parsed ? parsed.questions.reduce((m, q) => { m[q.type] = (m[q.type] || 0) + 1; return m; }, {}) : {};
   const total = parsed ? parsed.questions.length : 0;
+  const setCount = (k, v) => setAiCounts((c) => ({ ...c, [k]: v }));
 
   return (
     <ModalShell title="Soruları Toplu Ekle" onClose={onClose} width={820}>
       {!parsed && (
         <>
-          <div className="flex gap-2 mb-4">
-            {[["text", "Metin yapıştır"], ["json", "JSON dosyası"]].map(([id, label]) => (
+          <div className="flex flex-wrap gap-2 mb-4">
+            {[["ai", "Yapay Zeka ile Oluştur"], ["text", "Metin yapıştır"], ["json", "JSON dosyası"]].map(([id, label]) => (
               <button
                 key={id}
                 onClick={() => { setTab(id); setError(""); }}
+                disabled={aiLoading}
                 className="px-3.5 py-1.5 rounded-full text-xs font-medium transition"
                 style={{ background: tab === id ? COLORS.text : "rgba(255,255,255,0.8)", color: tab === id ? "#fff" : COLORS.textSecondary, border: "1px solid rgba(0,0,0,0.08)" }}
               >
@@ -4546,6 +4583,42 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
               </button>
             ))}
           </div>
+
+          {tab === "ai" && (
+            <>
+              <p className="text-xs mb-3" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>
+                Ders notunuzu, NotebookLM çıktısını ya da herhangi bir metni yapıştırın. Yapay zeka yalnızca bu metne dayanarak sorular hazırlar.
+                Sonucu önizlemede kontrol edip sınava eklersiniz.
+              </p>
+              <textarea
+                value={aiText}
+                onChange={(e) => setAiText(e.target.value)}
+                disabled={aiLoading}
+                rows={9}
+                placeholder="Kaynak metni buraya yapıştırın..."
+                className="w-full px-3.5 py-3 rounded-xl text-sm outline-none"
+                style={examTextareaStyle}
+              />
+              <div className="text-xs text-right mb-3" style={{ color: aiText.length > 60000 ? COLORS.red : COLORS.textSecondary }}>
+                {aiText.length.toLocaleString("tr-TR")} / 60.000 karakter
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <FormInput label="Çoktan seçmeli" type="number" min="0" max="40" value={aiCounts.mc} onChange={(e) => setCount("mc", e.target.value)} />
+                <FormInput label="Doğru / Yanlış" type="number" min="0" max="40" value={aiCounts.tf} onChange={(e) => setCount("tf", e.target.value)} />
+                <FormInput label="Boşluk doldurma" type="number" min="0" max="40" value={aiCounts.fill} onChange={(e) => setCount("fill", e.target.value)} />
+                <FormInput label="Açık uçlu" type="number" min="0" max="40" value={aiCounts.open} onChange={(e) => setCount("open", e.target.value)} />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <FormSelect label="Soruların dili" value={aiLang} onChange={(e) => setAiLang(e.target.value)}>
+                  <option value="auto">Kaynak metnin dili</option>
+                  <option value="tr">Türkçe</option>
+                  <option value="en">İngilizce</option>
+                </FormSelect>
+                <FormInput label="Düzey / ek not (opsiyonel)" placeholder="Örn. 9. sınıf, orta zorlukta" value={aiLevel} onChange={(e) => setAiLevel(e.target.value)} maxLength={300} />
+              </div>
+            </>
+          )}
 
           {tab === "json" && (
             <div className="flex items-center gap-3 mb-3">
@@ -4557,57 +4630,77 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
             </div>
           )}
 
-          <textarea
-            value={raw}
-            onChange={(e) => { setRaw(e.target.value); setParsed(null); }}
-            rows={tab === "json" ? 9 : 11}
-            placeholder={tab === "json" ? "JSON içeriği..." : "Soruları buraya yapıştırın. Sorular arasında boş satır bırakın."}
-            className="w-full px-3.5 py-3 rounded-xl outline-none mb-3"
-            style={{ ...examTextareaStyle, ...importMono }}
-          />
+          {tab !== "ai" && (
+            <>
+              <textarea
+                value={raw}
+                onChange={(e) => { setRaw(e.target.value); setParsed(null); }}
+                rows={tab === "json" ? 9 : 11}
+                placeholder={tab === "json" ? "JSON içeriği..." : "Soruları buraya yapıştırın. Sorular arasında boş satır bırakın."}
+                className="w-full px-3.5 py-3 rounded-xl outline-none mb-3"
+                style={{ ...examTextareaStyle, ...importMono }}
+              />
 
-          <details className="mb-4 rounded-xl px-4 py-3" style={{ background: "rgba(0,0,0,0.03)" }}>
-            <summary className="text-xs font-semibold cursor-pointer" style={{ color: COLORS.text }}>Biçim örneği ve kurallar</summary>
-            {tab === "text" ? (
-              <div className="mt-3">
-                <pre className="rounded-lg p-3 mb-2 whitespace-pre-wrap" style={{ ...importMono, background: "#fff", border: "1px solid rgba(0,0,0,0.08)" }}>{IMPORT_TEXT_EXAMPLE}</pre>
-                <ul className="text-xs pl-4" style={{ listStyle: "disc", color: COLORS.textSecondary, lineHeight: 1.7 }}>
-                  <li>Sorular arasında <b>boş satır</b> bırakın.</li>
-                  <li><b>Çoktan seçmeli:</b> şıklar A) B) C)... şeklinde, doğru şıkkın başına <b>*</b> koyun (ya da "Cevap: B" satırı ekleyin).</li>
-                  <li><b>Doğru/Yanlış:</b> şık yok, "Cevap: Doğru" ya da "Cevap: Yanlış".</li>
-                  <li><b>Boşluk doldurma:</b> şık yok, "Cevap: kelime". Birden fazla kabul edilen cevap için <b>|</b> ile ayırın.</li>
-                  <li><b>Yazma / açık uçlu:</b> satırın başına <b>[Yazma]</b> ya da <b>[Yazma 50-80]</b> (kelime aralığı) yazın. İsteğe bağlı "Not: ..." satırı öğrencilere görünmez.</li>
-                  <li>Okuma metni ve görsel eklemek için JSON biçimini kullanın.</li>
-                </ul>
-              </div>
-            ) : (
-              <div className="mt-3">
-                <pre className="rounded-lg p-3 mb-2 whitespace-pre-wrap" style={{ ...importMono, background: "#fff", border: "1px solid rgba(0,0,0,0.08)" }}>{IMPORT_JSON_EXAMPLE}</pre>
-                <ul className="text-xs pl-4" style={{ listStyle: "disc", color: COLORS.textSecondary, lineHeight: 1.7 }}>
-                  <li><b>type:</b> mc, tf, fill ya da open. <b>correct:</b> mc için 0'dan başlayan sıra ya da A–E harfi, tf için true/false, fill için cevap listesi.</li>
-                  <li>İsteğe bağlı alanlar: <b>passage</b> (okuma metni), <b>image_url</b>, <b>points</b>, <b>min_words</b>, <b>max_words</b>, <b>note</b>.</li>
-                  <li><b>Eski sınav sitesinin dosya biçimi</b> ("mc" ve "writing" alanları) olduğu gibi çalışır.</li>
-                </ul>
-              </div>
-            )}
-          </details>
+              <details className="mb-4 rounded-xl px-4 py-3" style={{ background: "rgba(0,0,0,0.03)" }}>
+                <summary className="text-xs font-semibold cursor-pointer" style={{ color: COLORS.text }}>Biçim örneği ve kurallar</summary>
+                {tab === "text" ? (
+                  <div className="mt-3">
+                    <pre className="rounded-lg p-3 mb-2 whitespace-pre-wrap" style={{ ...importMono, background: "#fff", border: "1px solid rgba(0,0,0,0.08)" }}>{IMPORT_TEXT_EXAMPLE}</pre>
+                    <ul className="text-xs pl-4" style={{ listStyle: "disc", color: COLORS.textSecondary, lineHeight: 1.7 }}>
+                      <li>Sorular arasında <b>boş satır</b> bırakın.</li>
+                      <li><b>Çoktan seçmeli:</b> şıklar A) B) C)... şeklinde, doğru şıkkın başına <b>*</b> koyun (ya da "Cevap: B" satırı ekleyin).</li>
+                      <li><b>Doğru/Yanlış:</b> şık yok, "Cevap: Doğru" ya da "Cevap: Yanlış".</li>
+                      <li><b>Boşluk doldurma:</b> şık yok, "Cevap: kelime". Birden fazla kabul edilen cevap için <b>|</b> ile ayırın.</li>
+                      <li><b>Yazma / açık uçlu:</b> satırın başına <b>[Yazma]</b> ya da <b>[Yazma 50-80]</b> (kelime aralığı) yazın. İsteğe bağlı "Not: ..." satırı öğrencilere görünmez.</li>
+                      <li>Okuma metni ve görsel eklemek için JSON biçimini kullanın.</li>
+                    </ul>
+                  </div>
+                ) : (
+                  <div className="mt-3">
+                    <pre className="rounded-lg p-3 mb-2 whitespace-pre-wrap" style={{ ...importMono, background: "#fff", border: "1px solid rgba(0,0,0,0.08)" }}>{IMPORT_JSON_EXAMPLE}</pre>
+                    <ul className="text-xs pl-4" style={{ listStyle: "disc", color: COLORS.textSecondary, lineHeight: 1.7 }}>
+                      <li><b>type:</b> mc, tf, fill ya da open. <b>correct:</b> mc için 0'dan başlayan sıra ya da A–E harfi, tf için true/false, fill için cevap listesi.</li>
+                      <li>İsteğe bağlı alanlar: <b>passage</b> (okuma metni), <b>image_url</b>, <b>points</b>, <b>min_words</b>, <b>max_words</b>, <b>note</b>.</li>
+                      <li><b>Eski sınav sitesinin dosya biçimi</b> ("mc" ve "writing" alanları) olduğu gibi çalışır.</li>
+                    </ul>
+                  </div>
+                )}
+              </details>
+            </>
+          )}
 
           <div className="grid grid-cols-2 gap-3">
-            <FormInput label="Soru başına puan (metin biçiminde)" type="number" min="0" step="0.5" value={points} onChange={(e) => setPoints(e.target.value)} />
-            <FormInput label="Yazma sorusu puanı (metin biçiminde)" type="number" min="0" step="0.5" value={openPoints} onChange={(e) => setOpenPoints(e.target.value)} />
+            <FormInput label="Soru başına puan" type="number" min="0" step="0.5" value={points} onChange={(e) => setPoints(e.target.value)} />
+            <FormInput label="Yazma / açık uçlu soru puanı" type="number" min="0" step="0.5" value={openPoints} onChange={(e) => setOpenPoints(e.target.value)} />
           </div>
           <p className="text-xs -mt-2 mb-3" style={{ color: COLORS.textSecondary }}>JSON'da sorunun kendi "points" değeri varsa o kullanılır.</p>
 
           {error && <p className="text-xs mb-3" style={{ color: COLORS.red }}>{error}</p>}
           <div className="flex gap-2">
-            <button onClick={onClose} className="px-4 py-3 rounded-xl text-sm font-medium" style={{ color: COLORS.textSecondary }}>Vazgeç</button>
-            <button onClick={check} className="flex-1 py-3 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.blue }}>Kontrol Et</button>
+            <button onClick={onClose} disabled={aiLoading} className="px-4 py-3 rounded-xl text-sm font-medium" style={{ color: COLORS.textSecondary }}>Vazgeç</button>
+            {tab === "ai" ? (
+              <button onClick={generateAi} disabled={aiLoading} className="flex-1 py-3 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.indigo, opacity: aiLoading ? 0.75 : 1 }}>
+                {aiLoading ? (
+                  <span className="inline-flex items-center gap-2">
+                    <span className="spin-anim inline-block w-3.5 h-3.5 rounded-full border-2 border-white" style={{ borderTopColor: "transparent" }} />
+                    İnceleniyor… (20-60 saniye sürebilir)
+                  </span>
+                ) : "Soruları Oluştur"}
+              </button>
+            ) : (
+              <button onClick={check} className="flex-1 py-3 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.blue }}>Kontrol Et</button>
+            )}
           </div>
         </>
       )}
 
       {parsed && (
         <>
+          {aiMade && (
+            <div className="rounded-xl px-4 py-3 mb-4 text-xs" style={{ background: `${COLORS.orange}15`, color: COLORS.text, lineHeight: 1.6 }}>
+              <b>Bu sorular yapay zeka tarafından hazırlandı.</b> Soru metinlerini ve yeşil yazılı doğru cevapları içe aktarmadan önce mutlaka kontrol edin. İçe aktardıktan sonra da her soruyu düzenleyebilirsiniz.
+            </div>
+          )}
           {parsed.errors.length > 0 ? (
             <div className="rounded-xl p-4 mb-4" style={{ background: `${COLORS.red}10` }}>
               <div className="text-sm font-semibold mb-2" style={{ color: COLORS.red }}>{parsed.errors.length} sorunu düzeltin, sonra tekrar kontrol edin</div>
