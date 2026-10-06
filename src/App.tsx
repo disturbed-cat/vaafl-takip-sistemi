@@ -298,11 +298,6 @@ const mapStudentTargets = (rows) => rows.map((st) => ({
   submittedAt: st.submitted_at, verifiedBy: st.verified_by, verifiedAt: st.verified_at,
 }));
 
-const mapAppointments = (rows) => rows.map((a) => ({
-  id: a.id, parentId: a.parent_id, studentId: a.student_id,
-  recipientType: a.recipient_type, recipientTeacherId: a.recipient_teacher_id,
-  date: a.appointment_date, time: (a.appointment_time || "").slice(0, 5), createdAt: a.created_at,
-}));
 
 const mapBookChecks = (rows) => rows.map((r) => ({
   id: r.id, studentId: r.student_id, classId: r.class_id, checkedBy: r.checked_by, date: r.check_date, status: r.status,
@@ -326,14 +321,13 @@ const mapScheduleSlots = (rows) => rows.map((r) => ({ id: r.id, teacherId: r.tea
 
 // Tüm tabloları çeker ve UI'ın beklediği şekle çevirir
 async function fetchAllData() {
-  const [profilesRes, classesRes, studentsRes, targetsRes, studentTargetsRes, credentialsRes, appointmentsRes, bookChecksRes, behaviorEventsRes, commentsRes, announcementsRes, teacherSubjectsRes, scheduleSlotsRes] = await Promise.all([
+  const [profilesRes, classesRes, studentsRes, targetsRes, studentTargetsRes, credentialsRes, bookChecksRes, behaviorEventsRes, commentsRes, announcementsRes, teacherSubjectsRes, scheduleSlotsRes] = await Promise.all([
     supabase.from("profiles").select("*"),
     supabase.from("classes").select("*"),
     supabase.from("students").select("*"),
     supabase.from("targets").select("*"),
     supabase.from("student_targets").select("*"),
     supabase.from("credentials").select("*"),
-    supabase.from("appointments").select("*"),
     supabase.from("book_checks").select("*"),
     supabase.from("behavior_events").select("*"),
     supabase.from("student_comments").select("*"),
@@ -352,7 +346,6 @@ async function fetchAllData() {
     targets: mapTargets(targetsRes.data),
     studentTargets: mapStudentTargets(rawStudentTargets),
     credentials: (credentialsRes.data || []).map((c) => ({ id: c.id, code: c.username_code, password: c.generated_password })),
-    appointments: mapAppointments(appointmentsRes.data || []),
     bookChecks: mapBookChecks(bookChecksRes.data || []),
     behaviorEvents: mapBehaviorEvents(behaviorEventsRes.data || []),
     studentComments: mapComments(commentsRes.data || []),
@@ -881,7 +874,6 @@ function LoginScreen({ onLogin }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [showAppointmentInfo, setShowAppointmentInfo] = useState(false);
 
   const handleSubmit = async () => {
     setError("");
@@ -939,17 +931,7 @@ function LoginScreen({ onLogin }) {
             </span>
           ) : "Giriş Yap"}
         </button>
-
-        <button
-          onClick={() => setShowAppointmentInfo(true)}
-          className="w-full py-3 rounded-xl text-sm font-semibold mt-3 transition"
-          style={{ color: COLORS.blue, background: `${COLORS.blue}0D`, border: `1px solid ${COLORS.blue}30` }}
-        >
-          Randevu almak mı istiyorsunuz?
-        </button>
       </div>
-
-      {showAppointmentInfo && <AppointmentInfoModal onClose={() => setShowAppointmentInfo(false)} />}
     </div>
   );
 }
@@ -3146,7 +3128,6 @@ export default function App() {
   const [targets, setTargets] = useState([]);
   const [studentTargets, setStudentTargets] = useState([]);
   const [credentials, setCredentials] = useState([]);
-  const [appointments, setAppointments] = useState([]);
   const [bookChecks, setBookChecks] = useState([]);
   const [behaviorEvents, setBehaviorEvents] = useState([]);
   const [studentComments, setStudentComments] = useState([]);
@@ -3167,8 +3148,6 @@ export default function App() {
   const [seatingClassId, setSeatingClassId] = useState(null);
   const [editingClass, setEditingClass] = useState(null);
   const [editingStudent, setEditingStudent] = useState(null);
-  const [showBookingModal, setShowBookingModal] = useState(false);
-  const [showMyAppointments, setShowMyAppointments] = useState(false);
   const [showCreateAnnouncement, setShowCreateAnnouncement] = useState(false);
   const [viewingAnnouncementId, setViewingAnnouncementId] = useState(null);
 
@@ -3180,7 +3159,6 @@ export default function App() {
       setTargets(data.targets);
       setStudentTargets(data.studentTargets);
       setCredentials(data.credentials);
-      setAppointments(data.appointments);
       setBookChecks(data.bookChecks);
       setBehaviorEvents(data.behaviorEvents);
       setStudentComments(data.studentComments);
@@ -3398,24 +3376,6 @@ export default function App() {
     reload();
   };
 
-  const createAppointment = async (parentId, studentId, payload) => {
-    const { error } = await supabase.from("appointments").insert({
-      parent_id: parentId, student_id: studentId,
-      recipient_type: payload.recipientType, recipient_teacher_id: payload.recipientTeacherId,
-      appointment_date: payload.date, appointment_time: payload.time,
-    });
-    if (error) { alert("Randevu oluşturulamadı: " + error.message); return false; }
-    alert("Randevunuz başarıyla oluşturuldu.");
-    reload();
-    return true;
-  };
-
-  const cancelAppointment = async (id) => {
-    const { error } = await supabase.from("appointments").delete().eq("id", id);
-    if (error) { alert("Randevu iptal edilemedi: " + error.message); return; }
-    reload();
-  };
-
   const recordBookCheck = async (studentId, classId, checkedBy, status) => {
     const { error } = await supabase.from("book_checks").upsert(
       { student_id: studentId, class_id: classId, checked_by: checkedBy, check_date: todayStr(), status },
@@ -3494,14 +3454,12 @@ export default function App() {
   const students = users.filter((u) => u.role === "student");
 
   if (currentUser.role === "admin") {
-    const ADMIN_TITLES = { overview: "Genel Bakış", users: "Kullanıcılar", classes: "Sınıflar", coaching: "Koç Atamaları", credentials: "Şifreler", appointments: "Randevular", schedule: "Ders Programı" };    const seatingClass = seatingClassId ? classes.find((c) => c.id === seatingClassId) : null;
+    const ADMIN_TITLES = { overview: "Genel Bakış", users: "Kullanıcılar", classes: "Sınıflar", coaching: "Koç Atamaları", credentials: "Şifreler", schedule: "Ders Programı" };    const seatingClass = seatingClassId ? classes.find((c) => c.id === seatingClassId) : null;
     const seatingClassStudents = seatingClass ? students.filter((s) => s.classId === seatingClass.id) : [];
-    const adminUpcomingCount = appointments.filter((a) => a.recipientType === "admin" && a.date >= todayStr()).length;
-    const adminNavItems = [...ADMIN_NAV, { id: "appointments", label: "Randevular", icon: CalendarDays, badge: adminUpcomingCount }];
     return (
       <>
         <div className="app-shell">
-          <Shell navItems={adminNavItems} active={adminActive} setActive={setAdminActive} user={{ name: currentUser.name, roleLabel: "Müdür" }} onLogout={onLogout} title={ADMIN_TITLES[adminActive]}>
+          <Shell navItems={ADMIN_NAV} active={adminActive} setActive={setAdminActive} user={{ name: currentUser.name, roleLabel: "Müdür" }} onLogout={onLogout} title={ADMIN_TITLES[adminActive]}>
             {adminActive === "overview" && (
               <>
                 <AdminOverviewTab users={users} classes={classes} />
@@ -3521,7 +3479,6 @@ export default function App() {
             {adminActive === "classes" && <ClassesTab classes={classes} users={users} onAddClick={() => setShowClassModal(true)} onSeatingClick={setSeatingClassId} onEditClick={setEditingClass} />}
             {adminActive === "coaching" && <CoachingTab users={users} classes={classes} onAssign={assignCoach} onUnassign={unassignCoach} />}
             {adminActive === "credentials" && <CredentialsTab users={users} classes={classes} credentials={credentials} onPrint={setPrintData} />}
-            {adminActive === "appointments" && <AdminAppointmentsTab appointments={appointments} users={users} />}
                         {adminActive === "schedule" && (
               <ScheduleTab
                 teachers={[...teachers, ...coaches]}
@@ -3603,12 +3560,11 @@ export default function App() {
         )}
       </>
     );
-  }
+  }  
   if (currentUser.role === "parent") {
     const child = users.find((u) => u.id === currentUser.childId);
     const childClass = child ? classes.find((c) => c.id === child.classId) : null;
     const myRecords = child ? studentTargets.filter((st) => st.studentId === child.id) : [];
-    const myAppointments = appointments.filter((a) => a.parentId === currentUser.id);
     const PROGRESS_TITLES = { overview: "Genel Bakış", targets: "Hedefler", summary: "Sınıf Özeti" };
     return (
       <>
@@ -3619,32 +3575,12 @@ export default function App() {
           user={{ name: currentUser.name, roleLabel: "Veli" }}
           onLogout={onLogout}
           title={PROGRESS_TITLES[progressActive]}
-          headerActions={
-            <>
-              <button onClick={() => setShowBookingModal(true)} className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold text-white flex-shrink-0" style={{ background: COLORS.blue }}>
-                <CalendarPlus size={14} /> <span className="hidden sm:inline">Randevu Al</span>
-              </button>
-              <button onClick={() => setShowMyAppointments(true)} className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold flex-shrink-0" style={{ color: COLORS.blue, background: `${COLORS.blue}12` }}>
-                <CalendarDays size={14} /> <span className="hidden sm:inline">Randevularım</span>{myAppointments.length > 0 && ` (${myAppointments.length})`}
-              </button>
-            </>
-          }
         >
           {!child && <p className="text-sm" style={{ color: COLORS.textSecondary }}>Bağlı öğrenci bulunamadı.</p>}
           {child && progressActive === "overview" && <ProgressOverviewTab person={child} myRecords={myRecords} targets={targets} classLabel={childClass?.name} showLiveTag announcements={announcements} onOpenAnnouncement={setViewingAnnouncementId} />}
           {child && progressActive === "targets" && <TargetsListTab myRecords={myRecords} targets={targets} readOnly />}
           {child && progressActive === "summary" && <ClassSummaryView students={[child]} bookChecks={bookChecks} behaviorEvents={behaviorEvents} comments={studentComments} />}
         </Shell>
-        {showBookingModal && (
-          <AppointmentBookingModal
-            onClose={() => setShowBookingModal(false)}
-            onSave={(payload) => createAppointment(currentUser.id, child?.id || null, payload)}
-            teachers={teachers}
-          />
-        )}
-        {showMyAppointments && (
-          <MyAppointmentsModal onClose={() => setShowMyAppointments(false)} appointments={myAppointments} users={users} onCancel={cancelAppointment} />
-        )}
         {viewingAnnouncementId && (
           <AnnouncementViewerModal announcements={announcements} initialId={viewingAnnouncementId} onClose={() => setViewingAnnouncementId(null)} />
         )}
@@ -3657,12 +3593,10 @@ export default function App() {
   const myTargets = targets.filter((t) => t.createdBy === currentUser.id);
   const poolLabel = isTeacher ? (myClass ? myClass.name : "Sınıfım") : "Öğrencilerim";
   const myClasses = isTeacher ? (myClass ? [myClass] : []) : classes.filter((c) => pool.some((s) => s.classId === c.id));
-  const myUpcomingAppointments = appointments.filter((a) => a.recipientType === "teacher" && a.recipientTeacherId === currentUser.id);
-  const myUpcomingCount = myUpcomingAppointments.filter((a) => a.date >= todayStr()).length;
-  const navItems = isTeacher
-    ? [...TC_NAV, { id: "seating", label: "Oturma Planı", icon: LayoutGrid }, { id: "appointments", label: "Yaklaşan Randevular", icon: CalendarDays, badge: myUpcomingCount }]
+    const navItems = isTeacher
+    ? [...TC_NAV, { id: "seating", label: "Oturma Planı", icon: LayoutGrid }]
     : TC_NAV;
-  const TC_TITLES = { overview: "Genel Bakış", students: "Öğrencilerim", myclasses: "Sınıflarım", targets: "Hedefler", verify: "Doğrulama", seating: "Oturma Planı", appointments: "Yaklaşan Randevular" };
+  const TC_TITLES = { overview: "Genel Bakış", students: "Öğrencilerim", myclasses: "Sınıflarım", targets: "Hedefler", verify: "Doğrulama", seating: "Oturma Planı"};
 
   return (
     <>
@@ -3714,7 +3648,6 @@ export default function App() {
               <p className="text-sm" style={{ color: COLORS.textSecondary }}>Henüz bir sınıfa atanmadınız.</p>
             )
           )}
-          {tcActive === "appointments" && isTeacher && <UpcomingAppointmentsTab appointments={myUpcomingAppointments} users={users} />}
         </Shell>
       </div>
       {showTargetModal && <AssignTargetModal onClose={() => setShowTargetModal(false)} onSave={(payload) => addTarget(payload, currentUser.id)} pool={pool} poolLabel={poolLabel} />}
