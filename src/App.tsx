@@ -3147,7 +3147,422 @@ function AssignExamModal({ exam, questionCount, classes, onClose }) {
   );
 }
 
-function ExamsTab({ currentUser, classes }) {
+/* ------------------------------------------------------------------ */
+/* Sınav sonuçları (öğretmen)                                           */
+/* ------------------------------------------------------------------ */
+
+const calcExamLevel = (levels, total, max) => {
+  if (!levels || total === null || total === undefined || !max) return null;
+  const pct = (Number(total) / Number(max)) * 100;
+  if (pct >= Number(levels.C1)) return "C1";
+  if (pct >= Number(levels.B2)) return "B2";
+  if (pct >= Number(levels.B1)) return "B1";
+  if (pct >= Number(levels.A2)) return "A2";
+  return "A1";
+};
+
+function downloadExamCsv(filename, rows) {
+  const esc = (v) => {
+    const s = v === null || v === undefined ? "" : String(v);
+    return /[";\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = "\uFEFF" + rows.map((r) => r.map(esc).join(";")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function AttemptDetailModal({ exam, questions, keys, student, attemptRow, onClose, onSaved }) {
+  const [answers, setAnswers] = useState(null);
+  const [scores, setScores] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const finished = attemptRow.status === "bitti";
+  const autoScores = attemptRow.auto_scores || {};
+
+  useEffect(() => {
+    (async () => {
+      const { data, error: err } = await supabase.from("exam_attempts").select("answers, manual_scores").eq("id", attemptRow.id).single();
+      if (err || !data) { setError("Cevaplar yüklenemedi."); setAnswers({}); return; }
+      setAnswers(data.answers || {});
+      const init = {};
+      Object.entries(data.manual_scores || {}).forEach(([k, v]) => { init[k] = String(v); });
+      setScores(init);
+    })();
+  }, []);
+
+  const openQs = questions.filter((q) => q.type === "open");
+  const autoSum = Object.keys(autoScores).reduce((s, k) => s + Number(autoScores[k] || 0), 0);
+  const manualSum = openQs.reduce((s, q) => s + (Number(String(scores[q.id] ?? "").replace(",", ".")) || 0), 0);
+  const maxScore = questions.reduce((s, q) => s + Number(q.points || 0), 0);
+
+  const save = async () => {
+    setError("");
+    const payload = {};
+    for (const q of openQs) {
+      const raw = String(scores[q.id] ?? "").replace(",", ".").trim();
+      const val = raw === "" ? 0 : Number(raw);
+      if (isNaN(val) || val < 0 || val > Number(q.points)) {
+        return setError(`"${q.text.slice(0, 40)}…" sorusunun puanı 0 ile ${Number(q.points)} arasında olmalı.`);
+      }
+      payload[q.id] = val;
+    }
+    setSaving(true);
+    const { data, error: err } = await supabase.rpc("score_attempt", { p_attempt_id: attemptRow.id, p_scores: payload });
+    setSaving(false);
+    if (err || !data?.ok) return setError("Kaydedilemedi: " + (err?.message || data?.error || "bilinmeyen hata"));
+    onSaved();
+  };
+
+  const letter = (i) => OPTION_LETTERS[i];
+
+  return (
+    <ModalShell title={`${student.name} — Cevaplar`} onClose={onClose} width={760}>
+      <div className="flex flex-wrap gap-2 mb-4">
+        <span className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: finished ? `${COLORS.green}15` : `${COLORS.orange}18`, color: finished ? COLORS.green : COLORS.orange }}>{finished ? "Sınavı bitirdi" : "Sınavda"}</span>
+        {attemptRow.end_reason === "timeout" && <span className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: `${COLORS.red}15`, color: COLORS.red }}>Süre doldu</span>}
+        <span className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: "rgba(0,0,0,0.06)", color: COLORS.textSecondary }}>Sekme çıkışı: {attemptRow.tab_switches}</span>
+        {finished && <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: `${COLORS.blue}12`, color: COLORS.blue }}>Toplam: {fmtScore(autoSum + manualSum)} / {fmtScore(maxScore)}</span>}
+      </div>
+
+      {answers === null && <p className="text-sm py-8 text-center" style={{ color: COLORS.textSecondary }}>Yükleniyor...</p>}
+
+      {answers !== null && (
+        <div className="flex flex-col gap-3 mb-4">
+          {questions.map((q, i) => {
+            const a = answers[q.id];
+            const k = keys[q.id];
+            const earned = autoScores[q.id];
+            return (
+              <div key={q.id} className="rounded-2xl p-4" style={{ background: "rgba(0,0,0,0.03)" }}>
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <span className="text-sm font-bold" style={{ color: COLORS.blue }}>{i + 1}.</span>
+                  <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: `${COLORS.indigo}15`, color: COLORS.indigo }}>{QUESTION_TYPE_LABEL[q.type]}</span>
+                  <span className="text-xs" style={{ color: COLORS.textSecondary }}>{Number(q.points)} puan</span>
+                  {finished && q.type !== "open" && earned !== undefined && (
+                    <span className="text-xs font-semibold" style={{ color: Number(earned) > 0 ? COLORS.green : COLORS.red }}>{Number(earned) > 0 ? `+${fmtScore(earned)}` : "0"}</span>
+                  )}
+                </div>
+                {q.passage && <p className="text-xs mb-2 whitespace-pre-wrap" style={{ color: COLORS.textSecondary }}>{q.passage}</p>}
+                {q.image_url && <img src={q.image_url} alt="" className="mb-2 rounded-lg" style={{ maxHeight: 140, objectFit: "contain", background: "#fff", border: "1px solid rgba(0,0,0,0.08)" }} />}
+                <p className="text-sm font-medium whitespace-pre-wrap mb-2" style={{ color: COLORS.text }}>{q.text}</p>
+
+                {q.type === "mc" && Array.isArray(q.options) && (
+                  <div className="flex flex-col gap-1">
+                    {q.options.map((o, j) => {
+                      const isCorrect = k === j;
+                      const isChosen = a === j;
+                      return (
+                        <div key={j} className="text-xs px-3 py-1.5 rounded-lg flex items-center gap-2" style={{ background: isCorrect ? `${COLORS.green}15` : isChosen ? `${COLORS.red}12` : "transparent", color: COLORS.text, fontWeight: isChosen || isCorrect ? 600 : 400 }}>
+                          <span>{letter(j)}) {o}</span>
+                          {isChosen && <span style={{ color: isCorrect ? COLORS.green : COLORS.red }}>← öğrencinin cevabı</span>}
+                          {isCorrect && !isChosen && <span style={{ color: COLORS.green }}>✓ doğru</span>}
+                        </div>
+                      );
+                    })}
+                    {a === undefined && <span className="text-xs" style={{ color: COLORS.textSecondary }}>Boş bırakıldı</span>}
+                  </div>
+                )}
+
+                {q.type === "tf" && (
+                  <p className="text-xs" style={{ color: COLORS.text }}>
+                    Öğrenci: <b>{a === undefined ? "Boş" : a ? "Doğru" : "Yanlış"}</b> · Doğru cevap: <b style={{ color: COLORS.green }}>{k === true ? "Doğru" : k === false ? "Yanlış" : "—"}</b>
+                  </p>
+                )}
+
+                {q.type === "fill" && (
+                  <p className="text-xs" style={{ color: COLORS.text }}>
+                    Öğrenci: <b>{typeof a === "string" && a.trim() ? a : "Boş"}</b> · Kabul edilen: <b style={{ color: COLORS.green }}>{Array.isArray(k) ? k.join(" / ") : "—"}</b>
+                  </p>
+                )}
+
+                {q.type === "open" && (
+                  <div>
+                    <div className="rounded-xl p-3 text-sm whitespace-pre-wrap mb-2" style={{ background: "#fff", color: COLORS.text, border: "1px solid rgba(0,0,0,0.08)", lineHeight: 1.6 }}>
+                      {typeof a === "string" && a.trim() ? a : <span style={{ color: COLORS.textSecondary }}>Boş bırakıldı</span>}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="text-xs" style={{ color: COLORS.textSecondary }}>{examWordCount(a)} kelime{q.min_words || q.max_words ? ` (hedef ${q.min_words || 0}–${q.max_words || "∞"})` : ""}</span>
+                      {typeof k === "string" && k && <span className="text-xs" style={{ color: COLORS.textSecondary }}>Not: {k}</span>}
+                      <span className="flex-1" />
+                      {finished && (
+                        <label className="flex items-center gap-2 text-xs font-medium" style={{ color: COLORS.text }}>
+                          Puan
+                          <input
+                            type="number" min="0" max={Number(q.points)} step="0.5"
+                            value={scores[q.id] ?? ""}
+                            onChange={(e) => setScores({ ...scores, [q.id]: e.target.value })}
+                            className="w-20 px-2.5 py-1.5 rounded-lg text-sm outline-none"
+                            style={{ border: "1px solid rgba(0,0,0,0.15)", background: "#fff" }}
+                          />
+                          <span style={{ color: COLORS.textSecondary }}>/ {Number(q.points)}</span>
+                        </label>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {Array.isArray(attemptRow.logins) && attemptRow.logins.length > 0 && (
+        <div className="rounded-2xl p-4 mb-4" style={{ background: "rgba(0,0,0,0.03)" }}>
+          <div className="text-xs font-semibold mb-2" style={{ color: COLORS.text }}>Giriş kayıtları</div>
+          {attemptRow.logins.map((l, i) => (
+            <div key={i} className="text-xs" style={{ color: COLORS.textSecondary, lineHeight: 1.7 }}>
+              {l.at ? fmtExamDate(l.at) : ""} · Cihaz <b>{l.deviceId}</b> · {l.os} · {l.browser} · {l.type} · {l.screen}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && <p className="text-xs mb-3" style={{ color: COLORS.red }}>{error}</p>}
+
+      {finished ? (
+        <div className="flex gap-2">
+          <button onClick={onClose} className="px-4 py-3 rounded-xl text-sm font-medium" style={{ color: COLORS.textSecondary }}>Kapat</button>
+          <button onClick={save} disabled={saving} className="flex-1 py-3 rounded-xl text-sm font-semibold text-white transition" style={{ background: COLORS.blue, opacity: saving ? 0.6 : 1 }}>
+            {saving ? "Kaydediliyor..." : openQs.length ? "Puanları Kaydet ve Onayla" : "Kapat"}
+          </button>
+        </div>
+      ) : (
+        <button onClick={onClose} className="w-full py-3 rounded-xl text-sm font-semibold" style={{ color: COLORS.textSecondary, background: "rgba(0,0,0,0.05)" }}>Kapat</button>
+      )}
+    </ModalShell>
+  );
+}
+
+function ExamResultsView({ exam, classes, students, onBack }) {
+  const [assignments, setAssignments] = useState([]);
+  const [classId, setClassId] = useState(null);
+  const [questions, setQuestions] = useState([]);
+  const [keys, setKeys] = useState({});
+  const [attempts, setAttempts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [detail, setDetail] = useState(null);
+  const [confirmResetId, setConfirmResetId] = useState(null);
+
+  const classNameOf = (id) => classes.find((c) => c.id === id)?.name || "?";
+  const assignment = assignments.find((a) => a.class_id === classId);
+
+  useEffect(() => {
+    (async () => {
+      const { data: asg, error: e1 } = await supabase.from("exam_assignments").select("*").eq("exam_id", exam.id);
+      const { data: qs, error: e2 } = await supabase.from("exam_questions").select("*").eq("exam_id", exam.id).order("position", { ascending: true }).order("created_at", { ascending: true });
+      if (e1 || e2) { setError("Veriler yüklenemedi: " + (e1?.message || e2?.message)); setLoading(false); return; }
+      const list = qs || [];
+      const keyMap = {};
+      if (list.length) {
+        const { data: ks } = await supabase.from("exam_keys").select("*").in("question_id", list.map((q) => q.id));
+        (ks || []).forEach((k) => { keyMap[k.question_id] = k.correct; });
+      }
+      const sorted = [...(asg || [])].sort((a, b) => classNameOf(a.class_id).localeCompare(classNameOf(b.class_id), "tr"));
+      setQuestions(list);
+      setKeys(keyMap);
+      setAssignments(sorted);
+      setClassId(sorted[0]?.class_id || null);
+      setLoading(false);
+    })();
+  }, []);
+
+  const loadAttempts = async (asgId, silent = false) => {
+    if (!silent) setRefreshing(true);
+    await supabase.rpc("finalize_expired_attempts", { p_assignment_id: asgId });
+    const { data, error: err } = await supabase
+      .from("exam_attempts")
+      .select("id, student_id, status, started_at, submitted_at, deadline, end_reason, tab_switches, logins, auto_scores, manual_scores, needs_manual, approved, total_score")
+      .eq("assignment_id", asgId);
+    if (err) setError("Sonuçlar yüklenemedi: " + err.message);
+    else { setAttempts(data || []); setError(""); }
+    setRefreshing(false);
+  };
+
+  useEffect(() => {
+    if (!assignment) return;
+    setAttempts([]);
+    loadAttempts(assignment.id);
+    const t = setInterval(() => loadAttempts(assignment.id, true), 20000);
+    return () => clearInterval(t);
+  }, [assignment?.id]);
+
+  const maxScore = questions.reduce((s, q) => s + Number(q.points || 0), 0);
+  const classStudents = students.filter((s) => s.classId === classId).sort((a, b) => a.name.localeCompare(b.name, "tr"));
+  const byStudent = Object.fromEntries(attempts.map((a) => [a.student_id, a]));
+
+  const deviceUsers = {};
+  attempts.forEach((a) => (a.logins || []).forEach((l) => {
+    if (l.deviceId) (deviceUsers[l.deviceId] = deviceUsers[l.deviceId] || new Set()).add(a.student_id);
+  }));
+  const sharedDevice = (a) => (a.logins || []).some((l) => l.deviceId && deviceUsers[l.deviceId] && deviceUsers[l.deviceId].size > 1);
+
+  const rows = classStudents.map((s) => ({ student: s, attempt: byStudent[s.id] || null }));
+  const finishedRows = rows.filter((r) => r.attempt?.status === "bitti");
+  const approvedRows = finishedRows.filter((r) => r.attempt.approved);
+  const inProgressCount = rows.filter((r) => r.attempt?.status === "devam").length;
+  const notStartedCount = rows.filter((r) => !r.attempt).length;
+  const needGradeCount = finishedRows.filter((r) => !r.attempt.approved).length;
+  const avgPct = approvedRows.length && maxScore ? Math.round(approvedRows.reduce((s, r) => s + (Number(r.attempt.total_score) / maxScore) * 100, 0) / approvedRows.length) : null;
+
+  const durationMin = (a) => (a.submitted_at && a.started_at ? Math.max(0, Math.round((Date.parse(a.submitted_at) - Date.parse(a.started_at)) / 60000)) : null);
+
+  const resetAttempt = async (attemptId) => {
+    const { error: err } = await supabase.from("exam_attempts").delete().eq("id", attemptId);
+    setConfirmResetId(null);
+    if (err) return setError("Sıfırlanamadı: " + err.message);
+    await loadAttempts(assignment.id, true);
+  };
+
+  const exportCsv = () => {
+    const header = ["Ad Soyad", "Durum", "Puan", "Toplam", "Yüzde", "Seviye", "Başlangıç", "Bitiş", "Süre (dk)", "Sekme çıkışı", "Cihaz"];
+    const data = rows.map(({ student, attempt }) => {
+      if (!attempt) return [student.name, "Girmedi", "", maxScore, "", "", "", "", "", "", ""];
+      const status = attempt.status === "devam" ? "Sınavda" : attempt.approved ? "Tamamlandı" : "Puanlama bekliyor";
+      const score = attempt.approved ? Number(attempt.total_score) : "";
+      const pct = attempt.approved && maxScore ? Math.round((Number(attempt.total_score) / maxScore) * 100) : "";
+      const lvl = attempt.approved ? calcExamLevel(exam.levels, attempt.total_score, maxScore) || "" : "";
+      const dev = (attempt.logins || []).map((l) => l.deviceId).filter(Boolean).filter((v, i, arr) => arr.indexOf(v) === i).join(" ");
+      return [student.name, status, score, maxScore, pct, lvl, attempt.started_at ? fmtExamDate(attempt.started_at) : "", attempt.submitted_at ? fmtExamDate(attempt.submitted_at) : "", durationMin(attempt) ?? "", attempt.tab_switches, dev];
+    });
+    downloadExamCsv(`${exam.title}-${classNameOf(classId)}-sonuclar.csv`, [header, ...data]);
+  };
+
+  const StatTile = ({ label, value, color }) => (
+    <div className="rounded-2xl px-4 py-3" style={{ background: `${color}12` }}>
+      <div className="text-2xl font-bold" style={{ color }}>{value}</div>
+      <div className="text-xs" style={{ color: COLORS.textSecondary }}>{label}</div>
+    </div>
+  );
+
+  return (
+    <div>
+      <button onClick={onBack} className="flex items-center gap-1 text-xs font-medium mb-4" style={{ color: COLORS.blue }}>
+        <ChevronLeft size={14} /> Sınavlarım
+      </button>
+      <div className="mb-4">
+        <h2 className="text-lg font-semibold" style={{ color: COLORS.text }}>{exam.title}</h2>
+        <p className="text-xs" style={{ color: COLORS.textSecondary }}>{exam.subject || "Sonuçlar"} · {questions.length} soru · toplam {fmtScore(maxScore)} puan</p>
+      </div>
+
+      {error && <p className="text-xs mb-3" style={{ color: COLORS.red }}>{error}</p>}
+      {loading && <div className="py-14 text-center text-sm" style={{ color: COLORS.textSecondary }}>Yükleniyor...</div>}
+
+      {!loading && assignments.length === 0 && (
+        <div className="rounded-2xl py-14 text-center text-sm" style={{ ...glassCard, color: COLORS.textSecondary }}>Bu sınav henüz hiçbir sınıfa atanmadı</div>
+      )}
+
+      {!loading && assignments.length > 0 && (
+        <>
+          <div className="flex flex-wrap gap-2 mb-4">
+            {assignments.map((a) => (
+              <button
+                key={a.class_id}
+                onClick={() => setClassId(a.class_id)}
+                className="px-3.5 py-1.5 rounded-full text-xs font-medium transition"
+                style={{ background: classId === a.class_id ? COLORS.text : "rgba(255,255,255,0.8)", color: classId === a.class_id ? "#fff" : COLORS.textSecondary, border: "1px solid rgba(0,0,0,0.08)" }}
+              >
+                {classNameOf(a.class_id)}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
+            <StatTile label="Öğrenci" value={rows.length} color={COLORS.blue} />
+            <StatTile label="Bitiren" value={finishedRows.length} color={COLORS.green} />
+            <StatTile label="Sınavda" value={inProgressCount} color={COLORS.orange} />
+            <StatTile label="Girmeyen" value={notStartedCount} color={COLORS.textSecondary} />
+            <StatTile label="Puanlama bekleyen" value={needGradeCount} color={COLORS.indigo} />
+            <StatTile label="Ortalama" value={avgPct === null ? "—" : `%${avgPct}`} color={COLORS.teal} />
+          </div>
+
+          <div className="flex items-center gap-2 mb-3">
+            <button onClick={() => assignment && loadAttempts(assignment.id)} disabled={refreshing} className="px-3.5 py-2 rounded-xl text-xs font-semibold" style={{ color: COLORS.blue, background: `${COLORS.blue}12`, opacity: refreshing ? 0.6 : 1 }}>
+              {refreshing ? "Yenileniyor..." : "Yenile"}
+            </button>
+            <span className="text-xs" style={{ color: COLORS.textSecondary }}>Liste 20 saniyede bir kendiliğinden yenilenir.</span>
+            <span className="flex-1" />
+            <button onClick={exportCsv} className="px-3.5 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.green }}>CSV indir</button>
+          </div>
+
+          <div className="rounded-2xl overflow-hidden" style={glassCard}>
+            {rows.length === 0 && <div className="py-12 text-center text-sm" style={{ color: COLORS.textSecondary }}>Bu sınıfta öğrenci yok</div>}
+            {rows.map(({ student, attempt }, i) => {
+              let badge = { label: "Girmedi", color: COLORS.textSecondary };
+              let scoreText = "";
+              if (attempt) {
+                if (attempt.status === "devam") badge = { label: "Sınavda", color: COLORS.orange };
+                else if (attempt.approved) {
+                  badge = { label: "Tamamlandı", color: COLORS.green };
+                  const pct = maxScore ? Math.round((Number(attempt.total_score) / maxScore) * 100) : 0;
+                  const lvl = calcExamLevel(exam.levels, attempt.total_score, maxScore);
+                  scoreText = `${fmtScore(attempt.total_score)} / ${fmtScore(maxScore)} · %${pct}${lvl ? ` · ${lvl}` : ""}`;
+                } else badge = { label: "Puanlama bekliyor", color: COLORS.indigo };
+              }
+              const dur = attempt ? durationMin(attempt) : null;
+              return (
+                <div key={student.id} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-5 py-3" style={{ borderTop: i === 0 ? "none" : "1px solid rgba(0,0,0,0.05)" }}>
+                  <div className="min-w-0 flex-1" style={{ minWidth: 150 }}>
+                    <div className="text-sm font-medium truncate" style={{ color: COLORS.text }}>{student.name}</div>
+                    {attempt && (
+                      <div className="text-xs" style={{ color: COLORS.textSecondary }}>
+                        {dur !== null ? `${dur} dk` : "devam ediyor"} · sekme çıkışı {attempt.tab_switches}
+                        {attempt.end_reason === "timeout" ? " · süre doldu" : ""}
+                      </div>
+                    )}
+                  </div>
+                  {attempt && sharedDevice(attempt) && (
+                    <span title="Aynı cihazdan birden fazla öğrenci girmiş" className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: `${COLORS.orange}18`, color: COLORS.orange }}>Ortak cihaz</span>
+                  )}
+                  {scoreText && <span className="text-sm font-semibold" style={{ color: COLORS.text }}>{scoreText}</span>}
+                  <span className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: `${badge.color}18`, color: badge.color }}>{badge.label}</span>
+                  {attempt && (
+                    confirmResetId === attempt.id ? (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs" style={{ color: COLORS.red }}>Cevaplar silinir, öğrenci yeniden girebilir.</span>
+                        <button onClick={() => resetAttempt(attempt.id)} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg text-white" style={{ background: COLORS.red }}>Sıfırla</button>
+                        <button onClick={() => setConfirmResetId(null)} className="text-xs font-medium px-2 py-1.5 rounded-lg" style={{ color: COLORS.textSecondary }}>Vazgeç</button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <button onClick={() => setDetail({ student, attempt })} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ color: COLORS.blue, background: `${COLORS.blue}12` }}>
+                          {attempt.status === "bitti" && !attempt.approved ? "Puanla" : "İncele"}
+                        </button>
+                        <button onClick={() => setConfirmResetId(attempt.id)} className="text-xs font-medium px-2.5 py-1.5 rounded-lg hover:bg-gray-100" style={{ color: COLORS.textSecondary }}>Sıfırla</button>
+                      </div>
+                    )
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {detail && (
+        <AttemptDetailModal
+          exam={exam}
+          questions={questions}
+          keys={keys}
+          student={detail.student}
+          attemptRow={detail.attempt}
+          onClose={() => setDetail(null)}
+          onSaved={async () => { setDetail(null); if (assignment) await loadAttempts(assignment.id, true); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ExamsTab({ currentUser, classes, students }) {
   const [exams, setExams] = useState([]);
   const [assignmentsByExam, setAssignmentsByExam] = useState({});
   const [loading, setLoading] = useState(true);
@@ -3155,6 +3570,7 @@ function ExamsTab({ currentUser, classes }) {
   const [editingId, setEditingId] = useState(undefined);
   const [confirmId, setConfirmId] = useState(null);
   const [assigning, setAssigning] = useState(null);
+  const [resultsExam, setResultsExam] = useState(null);
 
   const classNameOf = (id) => classes.find((c) => c.id === id)?.name || "?";
 
@@ -3189,6 +3605,9 @@ function ExamsTab({ currentUser, classes }) {
 
   if (editingId !== undefined) {
     return <ExamEditor examId={editingId} currentUser={currentUser} onBack={() => { setEditingId(undefined); loadList(); }} />;
+  }
+  if (resultsExam) {
+    return <ExamResultsView exam={resultsExam} classes={classes} students={students} onBack={() => setResultsExam(null)} />;
   }
 
   return (
@@ -3247,16 +3666,23 @@ function ExamsTab({ currentUser, classes }) {
                   <button onClick={() => setConfirmId(null)} className="text-xs font-medium px-2 py-1.5 rounded-lg" style={{ color: COLORS.textSecondary }}>Vazgeç</button>
                 </div>
               ) : (
-                <div className="flex gap-2">
-                  <button onClick={() => setAssigning(ex)} className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.blue }}>
-                    Sınıflara Ata
-                  </button>
-                  <button onClick={() => setEditingId(ex.id)} className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-semibold" style={{ color: COLORS.blue, background: `${COLORS.blue}12` }}>
-                    <Pencil size={14} /> Düzenle
-                  </button>
-                  <button onClick={() => setConfirmId(ex.id)} className="px-3 py-2 rounded-xl hover:bg-gray-100 transition" title="Sil">
-                    <Trash2 size={15} color={COLORS.textSecondary} />
-                  </button>
+                <div className="flex flex-col gap-2">
+                  <div className="flex gap-2">
+                    <button onClick={() => setAssigning(ex)} className="flex-1 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.blue }}>
+                      Sınıflara Ata
+                    </button>
+                    <button onClick={() => setResultsExam(ex)} className="flex-1 py-2 rounded-xl text-xs font-semibold" style={{ color: COLORS.green, background: `${COLORS.green}15` }}>
+                      Sonuçlar
+                    </button>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => setEditingId(ex.id)} className="flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-semibold" style={{ color: COLORS.blue, background: `${COLORS.blue}12` }}>
+                      <Pencil size={14} /> Düzenle
+                    </button>
+                    <button onClick={() => setConfirmId(ex.id)} className="px-3 py-2 rounded-xl hover:bg-gray-100 transition" title="Sil">
+                      <Trash2 size={15} color={COLORS.textSecondary} />
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -4706,7 +5132,7 @@ export default function App() {
           )}
           {tcActive === "targets" && <TargetsTab myTargets={myTargets} studentTargets={studentTargets} users={users} onAddClick={() => setShowTargetModal(true)} />}
           {tcActive === "verify" && <VerificationTab myTargets={myTargets} studentTargets={studentTargets} users={users} onVerify={verifyStudentTarget} />}
-          {tcActive === "exams" && <ExamsTab currentUser={currentUser} classes={classes} />}
+          {tcActive === "exams" && <ExamsTab currentUser={currentUser} classes={classes} students={students} />}
           {tcActive === "seating" && isTeacher && (
             myClass ? (
               <SeatingChartBoard cls={myClass} students={pool} initialChart={myClass.seatingChart} onSave={saveSeatingChart} onPrint={setPrintSeatingChart} />
