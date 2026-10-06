@@ -404,14 +404,21 @@ function FormSelect({ label, children, ...props }) {
 }
 
 function ModalShell({ title, onClose, children, width = 480 }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop-anim" style={{ background: "rgba(0,0,0,0.4)", backdropFilter: "blur(4px)" }} onClick={onClose}>
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop-anim"
+      style={{ background: "rgba(0,0,0,0.4)", backdropFilter: "blur(4px)", fontFamily: FONT }}
+      onClick={onClose}
+    >
       <div
         className="w-full rounded-3xl p-6 modal-content-anim"
         style={{ ...glassCard, background: "rgba(255,255,255,0.97)", maxWidth: width, maxHeight: "90vh", overflowY: "auto" }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between mb-5">
+        <div
+          className="flex items-center justify-between sticky top-0 z-10 -mx-6 -mt-6 px-6 pt-6 pb-4 mb-1"
+          style={{ background: "rgba(255,255,255,0.97)" }}
+        >
           <h3 className="text-lg font-semibold" style={{ color: COLORS.text }}>{title}</h3>
           <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-gray-100 transition">
             <X size={18} color={COLORS.textSecondary} />
@@ -419,7 +426,8 @@ function ModalShell({ title, onClose, children, width = 480 }) {
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
