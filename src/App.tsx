@@ -2880,9 +2880,12 @@ function ExamEditor({ examId, currentUser, onBack }) {
               <h3 className="text-sm font-semibold" style={{ color: COLORS.text }}>Sorular</h3>
               <p className="text-xs" style={{ color: COLORS.textSecondary }}>{questions.length} soru · toplam {totalPoints} puan</p>
             </div>
-            <button onClick={() => setEditingQ({ question: null })} className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.blue }}>
-              <Plus size={14} /> Soru Ekle
-            </button>
+              <div className="flex items-center gap-2">
+              <ExamImportButton examId={id} existingCount={questions.length} nextPosition={nextPosition} onImported={() => loadQuestions(id)} />
+              <button onClick={() => setEditingQ({ question: null })} className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.blue }}>
+                <Plus size={14} /> Soru Ekle
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-col gap-2">
@@ -4211,6 +4214,479 @@ function StudentExamsTab() {
     </div>
   );
 }
+/* ------------------------------------------------------------------ */
+/* Toplu içe aktarma (JSON / metin)                                     */
+/* ------------------------------------------------------------------ */
+
+const examUuid = () => (typeof crypto !== "undefined" && crypto.randomUUID)
+  ? crypto.randomUUID()
+  : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+    });
+
+const IMPORT_MAX = 300;
+const IMPORT_TYPE_ALIASES = {
+  mc: "mc", multiple_choice: "mc", coktan_secmeli: "mc", test: "mc",
+  tf: "tf", true_false: "tf", dogru_yanlis: "tf",
+  fill: "fill", fill_blank: "fill", fill_in_the_blank: "fill", bosluk_doldurma: "fill", bosluk: "fill",
+  open: "open", writing: "open", open_ended: "open", acik_uclu: "open", yazma: "open",
+};
+
+const importAscii = (s) => String(s ?? "").trim().toLowerCase()
+  .replace(/ç/g, "c").replace(/ş/g, "s").replace(/ğ/g, "g").replace(/ı/g, "i").replace(/ö/g, "o").replace(/ü/g, "u")
+  .replace(/İ/g, "i");
+
+const normalizeImportType = (t) => IMPORT_TYPE_ALIASES[importAscii(t).replace(/[\s-]+/g, "_")] || null;
+
+const parseTfValue = (v) => {
+  if (typeof v === "boolean") return v;
+  const s = importAscii(v);
+  if (["dogru", "true", "d", "t", "evet"].includes(s)) return true;
+  if (["yanlis", "false", "y", "f", "hayir"].includes(s)) return false;
+  return null;
+};
+
+const mcCorrectIndex = (v, options) => {
+  if (typeof v === "number" && Number.isInteger(v)) return v >= 0 && v < options.length ? v : null;
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  if (/^[A-Ea-e]$/.test(s)) {
+    const i = s.toUpperCase().charCodeAt(0) - 65;
+    return i < options.length ? i : null;
+  }
+  if (/^\d+$/.test(s)) {
+    const n = Number(s);
+    return n < options.length ? n : null;
+  }
+  const idx = options.findIndex((o) => o.trim().toLowerCase() === s.toLowerCase());
+  return idx >= 0 ? idx : null;
+};
+
+const splitFillAnswers = (v) => {
+  const arr = Array.isArray(v) ? v : String(v ?? "").split(/\s*\|\s*|\s*;\s*|\s+\/\s+/);
+  return arr.map((x) => String(x).trim()).filter(Boolean);
+};
+
+function parseImportJson(raw, defaults) {
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    return { questions: [], errors: ["JSON okunamadı. Dosyanın geçerli bir JSON olduğundan emin olun."] };
+  }
+  const list = [];
+  if (Array.isArray(data)) data.forEach((q) => list.push(q));
+  else if (data && typeof data === "object") {
+    if (Array.isArray(data.questions)) data.questions.forEach((q) => list.push(q));
+    if (Array.isArray(data.mc)) data.mc.forEach((q) => list.push({ ...q, type: "mc" }));
+    if (Array.isArray(data.writing)) data.writing.forEach((q) => list.push({ ...q, type: "open" }));
+  }
+  if (!list.length) {
+    return { questions: [], errors: ['Dosyada soru bulunamadı. Beklenen alanlar: "questions" ya da eski biçimdeki "mc" / "writing".'] };
+  }
+  if (list.length > IMPORT_MAX) return { questions: [], errors: [`En fazla ${IMPORT_MAX} soru içe aktarılabilir (dosyada ${list.length} var).`] };
+
+  const out = [];
+  const errors = [];
+  list.forEach((q, i) => {
+    const label = `${i + 1}. soru`;
+    if (!q || typeof q !== "object") { errors.push(`${label}: geçersiz kayıt.`); return; }
+    const text = String(q.text ?? q.question ?? "").trim();
+    if (!text) { errors.push(`${label}: soru metni boş.`); return; }
+
+    let type = normalizeImportType(q.type);
+    if (!type) {
+      if (Array.isArray(q.options)) type = "mc";
+      else if (typeof q.correct === "boolean") type = "tf";
+      else if (Array.isArray(q.correct) || typeof q.correct === "string") type = "fill";
+    }
+    if (!type) { errors.push(`${label}: soru tipi belirlenemedi ("type": mc / tf / fill / open).`); return; }
+
+    const rawPts = q.points;
+    const pts = rawPts !== undefined && rawPts !== null && rawPts !== "" ? Number(rawPts) : (type === "open" ? defaults.openPoints : defaults.points);
+    if (isNaN(pts) || pts < 0) { errors.push(`${label}: puan geçersiz.`); return; }
+
+    const item = {
+      type, text,
+      passage: String(q.passage ?? "").trim() || null,
+      image_url: q.image_url || q.imageUrl || null,
+      options: null, min_words: null, max_words: null, points: pts, key: null,
+    };
+
+    if (type === "mc") {
+      const options = Array.isArray(q.options) ? q.options.map((o) => String(o).trim()) : [];
+      if (options.length < 2 || options.length > 5 || options.some((o) => !o)) { errors.push(`${label}: çoktan seçmeli soruda 2 ile 5 arasında dolu şık olmalı.`); return; }
+      const idx = mcCorrectIndex(q.correct ?? q.answer, options);
+      if (idx === null) { errors.push(`${label}: doğru şık geçersiz ("correct": 0'dan başlayan sıra ya da A–E harfi).`); return; }
+      item.options = options;
+      item.key = idx;
+    } else if (type === "tf") {
+      const v = parseTfValue(q.correct ?? q.answer);
+      if (v === null) { errors.push(`${label}: doğru/yanlış sorusunda "correct" true/false (ya da Doğru/Yanlış) olmalı.`); return; }
+      item.key = v;
+    } else if (type === "fill") {
+      const answers = splitFillAnswers(q.correct ?? q.answers ?? q.answer);
+      if (!answers.length) { errors.push(`${label}: boşluk doldurma sorusunda en az bir kabul edilen cevap olmalı.`); return; }
+      item.key = answers;
+    } else {
+      const min = Number(q.min_words ?? q.minWords) || null;
+      const max = Number(q.max_words ?? q.maxWords) || null;
+      if (min && max && min > max) { errors.push(`${label}: en az kelime sayısı en fazlasından büyük.`); return; }
+      item.min_words = min;
+      item.max_words = max;
+      const note = String(q.note ?? (typeof q.correct === "string" ? q.correct : "") ?? "").trim();
+      item.key = note || null;
+    }
+    out.push(item);
+  });
+  return { questions: out, errors };
+}
+
+function parseImportText(raw, defaults) {
+  const blocks = String(raw || "").replace(/\r/g, "").split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean);
+  if (!blocks.length) return { questions: [], errors: ["Önce soruları yapıştırın."] };
+  if (blocks.length > IMPORT_MAX) return { questions: [], errors: [`En fazla ${IMPORT_MAX} soru içe aktarılabilir (${blocks.length} blok var).`] };
+
+  const out = [];
+  const errors = [];
+  blocks.forEach((b, n) => {
+    const label = `${n + 1}. blok`;
+    const lines = b.split("\n");
+
+    const om = lines[0].match(/^\[\s*(?:yazma|açık uçlu|acik uclu|writing|open)(?:\s+(\d+)\s*[-–]\s*(\d+))?\s*\]\s*(.*)$/i);
+    if (om) {
+      const min = om[1] ? Number(om[1]) : null;
+      const max = om[2] ? Number(om[2]) : null;
+      const rest = [om[3], ...lines.slice(1)];
+      const noteLines = [];
+      const textLines = [];
+      rest.forEach((l) => {
+        const nm = l.match(/^\s*(?:not|puanlama notu)\s*:\s*(.+)$/i);
+        if (nm) noteLines.push(nm[1].trim());
+        else textLines.push(l.trim());
+      });
+      const text = textLines.join("\n").trim();
+      if (!text) { errors.push(`${label}: yazma sorusunun metni boş.`); return; }
+      if (min && max && min > max) { errors.push(`${label}: en az kelime sayısı en fazlasından büyük.`); return; }
+      out.push({ type: "open", text, passage: null, image_url: null, options: null, min_words: min, max_words: max, points: defaults.openPoints, key: noteLines.join(" ") || null });
+      return;
+    }
+
+    const qt = [];
+    const opts = [];
+    let correctIdx = null;
+    let answerLine = null;
+    lines.forEach((l) => {
+      const am = l.match(/^\s*(?:cevap|doğru cevap|dogru cevap|answer)\s*[:\-]\s*(.+)$/i);
+      if (am) { answerLine = am[1].trim(); return; }
+      const mm = l.match(/^\s*(\*?)\s*([A-Ea-e])\s*[\)\.\-:]\s*(\*?)\s*(.+)$/);
+      if (mm && qt.length) {
+        if (mm[1] || mm[3]) correctIdx = opts.length;
+        opts.push(mm[4].trim());
+      } else if (!opts.length) {
+        qt.push(l.trim());
+      } else {
+        opts[opts.length - 1] += " " + l.trim();
+      }
+    });
+
+    const text = qt.join("\n").trim();
+    if (!text) { errors.push(`${label}: soru metni okunamadı.`); return; }
+
+    if (opts.length >= 2) {
+      if (opts.length > 5) { errors.push(`${label}: en fazla 5 şık (A–E) olabilir.`); return; }
+      let idx = correctIdx;
+      if (idx === null && answerLine) idx = mcCorrectIndex(answerLine, opts);
+      if (idx === null) { errors.push(`${label}: doğru şık belirtilmemiş (şıkkın başına * koyun ya da "Cevap: B" satırı ekleyin).`); return; }
+      out.push({ type: "mc", text, passage: null, image_url: null, options: opts, min_words: null, max_words: null, points: defaults.points, key: idx });
+      return;
+    }
+    if (opts.length === 1) { errors.push(`${label}: tek şık bulundu, en az 2 şık gerekli.`); return; }
+
+    if (answerLine) {
+      const tf = parseTfValue(answerLine);
+      if (tf !== null && importAscii(answerLine).length > 1) {
+        out.push({ type: "tf", text, passage: null, image_url: null, options: null, min_words: null, max_words: null, points: defaults.points, key: tf });
+        return;
+      }
+      const answers = splitFillAnswers(answerLine);
+      if (!answers.length) { errors.push(`${label}: "Cevap:" satırı boş.`); return; }
+      out.push({ type: "fill", text, passage: null, image_url: null, options: null, min_words: null, max_words: null, points: defaults.points, key: answers });
+      return;
+    }
+    errors.push(`${label}: soru tipi anlaşılamadı (şık, "Cevap:" satırı ya da [Yazma] işareti yok).`);
+  });
+  return { questions: out, errors };
+}
+
+const IMPORT_JSON_EXAMPLE = `{
+  "questions": [
+    { "type": "mc", "text": "She ___ to school every day.", "options": ["go", "goes", "going"], "correct": 1 },
+    { "type": "tf", "text": "Dünya yuvarlaktır.", "correct": true },
+    { "type": "fill", "text": "The capital of France is ___.", "correct": ["Paris"] },
+    { "type": "open", "text": "Describe your weekend.", "min_words": 50, "max_words": 80, "points": 10 }
+  ]
+}`;
+
+const IMPORT_TEXT_EXAMPLE = `She ___ to school every day.
+A) go
+*B) goes
+C) going
+
+Dünya yuvarlaktır.
+Cevap: Doğru
+
+The capital of France is ____.
+Cevap: Paris | paris
+
+[Yazma 50-80] Describe your weekend.`;
+
+const importMono = { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12 };
+
+const importKeySummary = (q) => {
+  if (q.type === "mc") return `Doğru: ${OPTION_LETTERS[q.key]}) ${q.options[q.key]}`;
+  if (q.type === "tf") return `Doğru: ${q.key ? "Doğru" : "Yanlış"}`;
+  if (q.type === "fill") return `Kabul edilen: ${q.key.join(" / ")}`;
+  return q.min_words || q.max_words ? `Kelime: ${q.min_words || 0}–${q.max_words || "∞"}` : "Açık uçlu";
+};
+
+function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImported }) {
+  const [tab, setTab] = useState("text");
+  const [raw, setRaw] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [points, setPoints] = useState(1);
+  const [openPoints, setOpenPoints] = useState(10);
+  const [replace, setReplace] = useState(false);
+  const [parsed, setParsed] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleFile = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    try {
+      const t = await f.text();
+      setRaw(t);
+      setFileName(f.name);
+      setParsed(null);
+      setError("");
+    } catch (err) {
+      setError("Dosya okunamadı.");
+    }
+    e.target.value = "";
+  };
+
+  const check = () => {
+    setError("");
+    const defaults = { points: Number(String(points).replace(",", ".")), openPoints: Number(String(openPoints).replace(",", ".")) };
+    if (isNaN(defaults.points) || defaults.points < 0 || isNaN(defaults.openPoints) || defaults.openPoints < 0) {
+      return setError("Puan değerleri 0 veya daha büyük bir sayı olmalı.");
+    }
+    if (!raw.trim()) return setError(tab === "json" ? "Önce bir JSON dosyası seçin ya da JSON'u yapıştırın." : "Önce soruları yapıştırın.");
+    setParsed(tab === "json" ? parseImportJson(raw, defaults) : parseImportText(raw, defaults));
+  };
+
+  const doImport = async () => {
+    if (!parsed || parsed.errors.length || !parsed.questions.length) return;
+    setError("");
+    setImporting(true);
+
+    let oldIds = [];
+    if (replace) {
+      const { data: asg } = await supabase.from("exam_assignments").select("id").eq("exam_id", examId);
+      const asgIds = (asg || []).map((a) => a.id);
+      if (asgIds.length) {
+        const { count } = await supabase.from("exam_attempts").select("id", { count: "exact", head: true }).in("assignment_id", asgIds);
+        if (count > 0) {
+          setImporting(false);
+          return setError("Bu sınavı çözen öğrenci var, soruları silerek değiştiremezsiniz. Önce Sonuçlar ekranından öğrencileri sıfırlayın ya da \"Mevcut soruları sil\" seçeneğini kapatıp soruları ekleyin.");
+        }
+      }
+      const { data: old } = await supabase.from("exam_questions").select("id").eq("exam_id", examId);
+      oldIds = (old || []).map((q) => q.id);
+    }
+
+    const rows = parsed.questions.map((q, i) => ({
+      id: examUuid(), exam_id: examId, position: nextPosition + i, type: q.type, text: q.text, passage: q.passage,
+      image_url: q.image_url, options: q.options, points: q.points, min_words: q.min_words, max_words: q.max_words,
+    }));
+    const { error: e1 } = await supabase.from("exam_questions").insert(rows);
+    if (e1) { setImporting(false); return setError("Sorular eklenemedi: " + e1.message); }
+
+    const keyRows = parsed.questions.map((q, i) => ({ question_id: rows[i].id, correct: q.key }));
+    const { error: e2 } = await supabase.from("exam_keys").insert(keyRows);
+    if (e2) {
+      await supabase.from("exam_questions").delete().in("id", rows.map((r) => r.id));
+      setImporting(false);
+      return setError("Doğru cevaplar kaydedilemedi, hiçbir soru eklenmedi: " + e2.message);
+    }
+
+    if (oldIds.length) await supabase.from("exam_questions").delete().in("id", oldIds);
+    setImporting(false);
+    onImported();
+  };
+
+  const counts = parsed ? parsed.questions.reduce((m, q) => { m[q.type] = (m[q.type] || 0) + 1; return m; }, {}) : {};
+  const total = parsed ? parsed.questions.length : 0;
+
+  return (
+    <ModalShell title="Soruları Toplu Ekle" onClose={onClose} width={820}>
+      {!parsed && (
+        <>
+          <div className="flex gap-2 mb-4">
+            {[["text", "Metin yapıştır"], ["json", "JSON dosyası"]].map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => { setTab(id); setError(""); }}
+                className="px-3.5 py-1.5 rounded-full text-xs font-medium transition"
+                style={{ background: tab === id ? COLORS.text : "rgba(255,255,255,0.8)", color: tab === id ? "#fff" : COLORS.textSecondary, border: "1px solid rgba(0,0,0,0.08)" }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {tab === "json" && (
+            <div className="flex items-center gap-3 mb-3">
+              <label className="px-3.5 py-2 rounded-xl text-xs font-semibold cursor-pointer" style={{ color: COLORS.blue, background: `${COLORS.blue}12` }}>
+                Dosya seç (.json)
+                <input type="file" accept=".json,application/json" onChange={handleFile} className="hidden" />
+              </label>
+              <span className="text-xs" style={{ color: COLORS.textSecondary }}>{fileName || "Dosya seçilmedi. İsterseniz JSON'u aşağıya yapıştırabilirsiniz."}</span>
+            </div>
+          )}
+
+          <textarea
+            value={raw}
+            onChange={(e) => { setRaw(e.target.value); setParsed(null); }}
+            rows={tab === "json" ? 9 : 11}
+            placeholder={tab === "json" ? "JSON içeriği..." : "Soruları buraya yapıştırın. Sorular arasında boş satır bırakın."}
+            className="w-full px-3.5 py-3 rounded-xl outline-none mb-3"
+            style={{ ...examTextareaStyle, ...importMono }}
+          />
+
+          <details className="mb-4 rounded-xl px-4 py-3" style={{ background: "rgba(0,0,0,0.03)" }}>
+            <summary className="text-xs font-semibold cursor-pointer" style={{ color: COLORS.text }}>Biçim örneği ve kurallar</summary>
+            {tab === "text" ? (
+              <div className="mt-3">
+                <pre className="rounded-lg p-3 mb-2 whitespace-pre-wrap" style={{ ...importMono, background: "#fff", border: "1px solid rgba(0,0,0,0.08)" }}>{IMPORT_TEXT_EXAMPLE}</pre>
+                <ul className="text-xs pl-4" style={{ listStyle: "disc", color: COLORS.textSecondary, lineHeight: 1.7 }}>
+                  <li>Sorular arasında <b>boş satır</b> bırakın.</li>
+                  <li><b>Çoktan seçmeli:</b> şıklar A) B) C)... şeklinde, doğru şıkkın başına <b>*</b> koyun (ya da "Cevap: B" satırı ekleyin).</li>
+                  <li><b>Doğru/Yanlış:</b> şık yok, "Cevap: Doğru" ya da "Cevap: Yanlış".</li>
+                  <li><b>Boşluk doldurma:</b> şık yok, "Cevap: kelime". Birden fazla kabul edilen cevap için <b>|</b> ile ayırın.</li>
+                  <li><b>Yazma / açık uçlu:</b> satırın başına <b>[Yazma]</b> ya da <b>[Yazma 50-80]</b> (kelime aralığı) yazın. İsteğe bağlı "Not: ..." satırı öğrencilere görünmez.</li>
+                  <li>Okuma metni ve görsel eklemek için JSON biçimini kullanın.</li>
+                </ul>
+              </div>
+            ) : (
+              <div className="mt-3">
+                <pre className="rounded-lg p-3 mb-2 whitespace-pre-wrap" style={{ ...importMono, background: "#fff", border: "1px solid rgba(0,0,0,0.08)" }}>{IMPORT_JSON_EXAMPLE}</pre>
+                <ul className="text-xs pl-4" style={{ listStyle: "disc", color: COLORS.textSecondary, lineHeight: 1.7 }}>
+                  <li><b>type:</b> mc, tf, fill ya da open. <b>correct:</b> mc için 0'dan başlayan sıra ya da A–E harfi, tf için true/false, fill için cevap listesi.</li>
+                  <li>İsteğe bağlı alanlar: <b>passage</b> (okuma metni), <b>image_url</b>, <b>points</b>, <b>min_words</b>, <b>max_words</b>, <b>note</b>.</li>
+                  <li><b>Eski sınav sitesinin dosya biçimi</b> ("mc" ve "writing" alanları) olduğu gibi çalışır.</li>
+                </ul>
+              </div>
+            )}
+          </details>
+
+          <div className="grid grid-cols-2 gap-3">
+            <FormInput label="Soru başına puan (metin biçiminde)" type="number" min="0" step="0.5" value={points} onChange={(e) => setPoints(e.target.value)} />
+            <FormInput label="Yazma sorusu puanı (metin biçiminde)" type="number" min="0" step="0.5" value={openPoints} onChange={(e) => setOpenPoints(e.target.value)} />
+          </div>
+          <p className="text-xs -mt-2 mb-3" style={{ color: COLORS.textSecondary }}>JSON'da sorunun kendi "points" değeri varsa o kullanılır.</p>
+
+          {error && <p className="text-xs mb-3" style={{ color: COLORS.red }}>{error}</p>}
+          <div className="flex gap-2">
+            <button onClick={onClose} className="px-4 py-3 rounded-xl text-sm font-medium" style={{ color: COLORS.textSecondary }}>Vazgeç</button>
+            <button onClick={check} className="flex-1 py-3 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.blue }}>Kontrol Et</button>
+          </div>
+        </>
+      )}
+
+      {parsed && (
+        <>
+          {parsed.errors.length > 0 ? (
+            <div className="rounded-xl p-4 mb-4" style={{ background: `${COLORS.red}10` }}>
+              <div className="text-sm font-semibold mb-2" style={{ color: COLORS.red }}>{parsed.errors.length} sorunu düzeltin, sonra tekrar kontrol edin</div>
+              <ul className="text-xs pl-4" style={{ listStyle: "disc", color: COLORS.text, lineHeight: 1.7 }}>
+                {parsed.errors.slice(0, 10).map((e, i) => <li key={i}>{e}</li>)}
+              </ul>
+              {parsed.errors.length > 10 && <p className="text-xs mt-1" style={{ color: COLORS.textSecondary }}>... ve {parsed.errors.length - 10} sorun daha.</p>}
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap gap-2 mb-3">
+                <span className="text-sm font-semibold mr-1" style={{ color: COLORS.green }}>{total} soru okundu</span>
+                {Object.entries(counts).map(([t, n]) => (
+                  <span key={t} className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: `${COLORS.indigo}15`, color: COLORS.indigo }}>{QUESTION_TYPE_LABEL[t]}: {n}</span>
+                ))}
+              </div>
+              <div className="flex flex-col gap-2 mb-4" style={{ maxHeight: 340, overflowY: "auto" }}>
+                {parsed.questions.slice(0, 80).map((q, i) => (
+                  <div key={i} className="rounded-xl px-4 py-2.5" style={{ background: "rgba(0,0,0,0.03)" }}>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="text-xs font-bold" style={{ color: COLORS.blue }}>{i + 1}.</span>
+                      <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: `${COLORS.indigo}15`, color: COLORS.indigo }}>{QUESTION_TYPE_LABEL[q.type]}</span>
+                      <span className="text-xs" style={{ color: COLORS.textSecondary }}>{q.points} puan</span>
+                      {q.passage && <span className="text-xs" style={{ color: COLORS.textSecondary }}>· okuma metni</span>}
+                      {q.image_url && <span className="text-xs" style={{ color: COLORS.textSecondary }}>· görsel</span>}
+                    </div>
+                    <p className="text-sm whitespace-pre-wrap" style={{ color: COLORS.text, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{q.text}</p>
+                    <p className="text-xs mt-0.5" style={{ color: COLORS.green }}>{importKeySummary(q)}</p>
+                  </div>
+                ))}
+                {total > 80 && <p className="text-xs text-center py-1" style={{ color: COLORS.textSecondary }}>... ve {total - 80} soru daha (hepsi eklenecek).</p>}
+              </div>
+              <ExamToggle
+                checked={replace}
+                onChange={setReplace}
+                title="Mevcut soruları sil ve bunlarla değiştir"
+                desc={existingCount ? `Şu an sınavda ${existingCount} soru var. Kapalıysa yeni sorular mevcutların sonuna eklenir. Sınavı çözen öğrenci varsa silerek değiştirme yapılamaz.` : "Sınavda henüz soru yok, yeni sorular eklenecek."}
+              />
+            </>
+          )}
+
+          {error && <p className="text-xs mb-3 mt-2" style={{ color: COLORS.red }}>{error}</p>}
+          <div className="flex gap-2 mt-3">
+            <button onClick={() => { setParsed(null); setError(""); }} disabled={importing} className="px-4 py-3 rounded-xl text-sm font-medium" style={{ color: COLORS.textSecondary }}>Geri</button>
+            <button
+              onClick={doImport}
+              disabled={importing || parsed.errors.length > 0 || !total}
+              className="flex-1 py-3 rounded-xl text-sm font-semibold text-white transition"
+              style={{ background: COLORS.green, opacity: (importing || parsed.errors.length > 0 || !total) ? 0.5 : 1 }}
+            >
+              {importing ? "İçe aktarılıyor..." : `${total} soruyu içe aktar`}
+            </button>
+          </div>
+        </>
+      )}
+    </ModalShell>
+  );
+}
+
+function ExamImportButton({ examId, existingCount, nextPosition, onImported }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)} className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold" style={{ color: COLORS.blue, background: `${COLORS.blue}12` }}>
+        Toplu Ekle / İçe Aktar
+      </button>
+      {open && (
+        <ExamImportModal
+          examId={examId}
+          existingCount={existingCount}
+          nextPosition={nextPosition}
+          onClose={() => setOpen(false)}
+          onImported={async () => { setOpen(false); await onImported(); }}
+        />
+      )}
+    </>
+  );
+}
+
 function TCOverviewTab({ pool, myTargets, studentTargets, groupLabel }) {
   const myTargetIds = myTargets.map((t) => t.id);
   const relevant = studentTargets.filter((st) => myTargetIds.includes(st.targetId));
