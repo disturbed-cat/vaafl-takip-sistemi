@@ -4467,8 +4467,7 @@ const PDFJS_SOURCES = [
 ];
 
 // Yapay zekanın verdiği 0-1000 aralığındaki şekil konumunu gerçek piksel kutusuna çevirir (kenarlara küçük pay bırakır)
-function figureToRect(fig, W, H) {
-  const pad = 6;
+function figureToRect(fig, W, H, pad = 6) {
   const x0 = Math.max(0, fig.x - pad);
   const y0 = Math.max(0, fig.y - pad);
   const x1 = Math.min(1000, fig.x + fig.width + pad);
@@ -4578,9 +4577,9 @@ async function pdfFileToPages(file, limit) {
 }
 
 // Sayfa görüntüsünden yapay zekanın gösterdiği bölgeyi keser
-async function cropFromBlob(blob, fig) {
+async function cropFromBlob(blob, fig, pad = 6) {
   const bmp = await createImageBitmap(blob);
-  const r = figureToRect(fig, bmp.width, bmp.height);
+  const r = figureToRect(fig, bmp.width, bmp.height, pad);
   const { canvas, ctx } = newWhiteCanvas(r.w, r.h);
   ctx.drawImage(bmp, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
   if (bmp.close) bmp.close();
@@ -4596,6 +4595,39 @@ async function readInvokeError(error) {
     if (b?.error) return b.error;
   } catch (e) { /* gövde okunamadı */ }
   return "Sunucu yanıt vermedi (zaman aşımı olabilir). Daha az sayfayla tekrar deneyin.";
+}
+
+const CROP_MIN = 0.02;
+const cropClamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// Kutuyu çizme / taşıma / kenar ve köşelerinden boyutlandırma (tüm değerler 0-1 oranı)
+function dragRect(mode, start, p, orig) {
+  if (mode === "draw") {
+    return { x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) };
+  }
+  const dx = p.x - start.x;
+  const dy = p.y - start.y;
+  if (mode === "move") {
+    return { ...orig, x: cropClamp(orig.x + dx, 0, 1 - orig.w), y: cropClamp(orig.y + dy, 0, 1 - orig.h) };
+  }
+  let x0 = orig.x;
+  let y0 = orig.y;
+  let x1 = orig.x + orig.w;
+  let y1 = orig.y + orig.h;
+  if (mode.includes("w")) x0 = cropClamp(orig.x + dx, 0, x1 - CROP_MIN);
+  if (mode.includes("e")) x1 = cropClamp(orig.x + orig.w + dx, x0 + CROP_MIN, 1);
+  if (mode.includes("n")) y0 = cropClamp(orig.y + dy, 0, y1 - CROP_MIN);
+  if (mode.includes("s")) y1 = cropClamp(orig.y + orig.h + dy, y0 + CROP_MIN, 1);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+// Yapay zekanın verdiği şekil konumuna kesimde kullanılan payı ekler (düzenleyicide gerçek kesim alanı görünsün diye)
+function padFigure(fig, pad = 6) {
+  const x0 = Math.max(0, fig.x - pad);
+  const y0 = Math.max(0, fig.y - pad);
+  const x1 = Math.min(1000, fig.x + fig.width + pad);
+  const y1 = Math.min(1000, fig.y + fig.height + pad);
+  return { pageIndex: fig.pageIndex, x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
 // Sayfaları gruplar halinde yapay zekaya gönderir, soruları ve şekil konumlarını toplar, şekilleri keser.
@@ -4627,6 +4659,7 @@ async function runVisionExtraction({ pages, lang, level, defaults, invoke, crop,
   const parsed = parseImportJson(JSON.stringify({ questions: clean }), defaults, true);
   for (const pq of parsed.questions) {
     const fig = all[pq.src] ? all[pq.src].fig : null;
+    if (fig) pq.fig = padFigure(fig);
     if (!fig || !pages[fig.pageIndex]) continue;
     try {
       const blob = await crop(pages[fig.pageIndex], fig);
@@ -4635,8 +4668,7 @@ async function runVisionExtraction({ pages, lang, level, defaults, invoke, crop,
       warnings.push(`${pq.src + 1}. sorunun şekli kesilemedi.`);
     }
   }
-  parsed.warnings = [...warnings, ...(parsed.warnings || [])];
-  return { parsed };
+  return { parsed: { ...parsed, warnings: [...warnings, ...(parsed.warnings || [])], pages } };
 }
 
 function ExamVisionPane({ getDefaults, onParsed, onBusy }) {
@@ -4787,6 +4819,139 @@ function ExamVisionPane({ getDefaults, onParsed, onBusy }) {
   );
 }
 
+const CROP_HANDLES = [
+  { mode: "nw", hx: 0, hy: 0, cursor: "nwse-resize" }, { mode: "n", hx: 0.5, hy: 0, cursor: "ns-resize" },
+  { mode: "ne", hx: 1, hy: 0, cursor: "nesw-resize" }, { mode: "e", hx: 1, hy: 0.5, cursor: "ew-resize" },
+  { mode: "se", hx: 1, hy: 1, cursor: "nwse-resize" }, { mode: "s", hx: 0.5, hy: 1, cursor: "ns-resize" },
+  { mode: "sw", hx: 0, hy: 1, cursor: "nesw-resize" }, { mode: "w", hx: 0, hy: 0.5, cursor: "ew-resize" },
+];
+
+// Sayfa görüntüsü üzerinde şekil kutusunu çizme / taşıma / boyutlandırma ekranı
+function FigureCropEditor({ pages, initial, hasCrop, onApply, onRemove, onClose }) {
+  const hasInitial = !!(initial && pages[initial.pageIndex]);
+  const [pageIdx, setPageIdx] = useState(hasInitial ? initial.pageIndex : 0);
+  const [rect, setRect] = useState(hasInitial ? { x: initial.x / 1000, y: initial.y / 1000, w: initial.width / 1000, h: initial.height / 1000 } : null);
+  const [imgUrl, setImgUrl] = useState(null);
+  const [boxEl, setBoxEl] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [D] = useState(() => ({ mode: null, start: null, orig: null }));
+
+  useEffect(() => {
+    const u = URL.createObjectURL(pages[pageIdx].fullBlob);
+    setImgUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [pageIdx]);
+
+  const goPage = (i) => {
+    if (i < 0 || i >= pages.length || i === pageIdx) return;
+    setPageIdx(i);
+    setRect(null);
+    setErr("");
+  };
+
+  const toFrac = (e) => {
+    const r = boxEl.getBoundingClientRect();
+    return { x: cropClamp((e.clientX - r.left) / r.width, 0, 1), y: cropClamp((e.clientY - r.top) / r.height, 0, 1) };
+  };
+  const begin = (mode, e, orig) => {
+    if (!boxEl) return;
+    e.preventDefault();
+    D.mode = mode;
+    D.start = toFrac(e);
+    D.orig = orig;
+    try { boxEl.setPointerCapture(e.pointerId); } catch (x) { /* eski tarayıcı */ }
+  };
+  const startDraw = (e) => { setErr(""); const p = boxEl ? toFrac(e) : { x: 0, y: 0 }; begin("draw", e, null); setRect({ x: p.x, y: p.y, w: 0, h: 0 }); };
+  const startMove = (e) => { e.stopPropagation(); begin("move", e, rect); };
+  const startResize = (mode) => (e) => { e.stopPropagation(); begin(mode, e, rect); };
+  const onMove = (e) => {
+    if (!D.mode || !boxEl) return;
+    setRect(dragRect(D.mode, D.start, toFrac(e), D.orig));
+  };
+  const endDrag = () => {
+    if (D.mode === "draw") setRect((r) => (r && (r.w < CROP_MIN || r.h < CROP_MIN) ? null : r));
+    D.mode = null;
+  };
+
+  const apply = async () => {
+    if (!rect || rect.w < CROP_MIN || rect.h < CROP_MIN) return setErr("Önce şeklin etrafına bir kutu çizin (çok küçük olmasın).");
+    setBusy(true);
+    setErr("");
+    const fig = { pageIndex: pageIdx, x: rect.x * 1000, y: rect.y * 1000, width: rect.w * 1000, height: rect.h * 1000 };
+    try {
+      const blob = await cropFromBlob(pages[pageIdx].fullBlob, fig, 0);
+      if (!blob) throw new Error("blob");
+      onApply(blob, fig);
+    } catch (e) {
+      setBusy(false);
+      setErr("Kesim yapılamadı. Tekrar deneyin.");
+    }
+  };
+
+  return (
+    <ModalShell title="Şekil kutusunu ayarla" onClose={onClose} width={760}>
+      <p className="text-xs mb-3" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>
+        Şeklin etrafına fare ya da parmakla bir kutu çizin. Kutuyu sürükleyerek taşıyabilir, kenar ve köşelerinden boyutlandırabilirsiniz.
+        Yeni bir kutu çizmek için kutunun dışından sürükleyin.
+      </p>
+
+      {pages.length > 1 && (
+        <div className="flex items-center gap-2 mb-3">
+          <button onClick={() => goPage(pageIdx - 1)} disabled={pageIdx === 0 || busy} className="p-1.5 rounded-lg hover:bg-gray-100" style={{ opacity: pageIdx === 0 ? 0.3 : 1 }}>
+            <ChevronLeft size={16} color={COLORS.textSecondary} />
+          </button>
+          <span className="text-xs font-medium" style={{ color: COLORS.text }}>Sayfa {pageIdx + 1} / {pages.length}</span>
+          <button onClick={() => goPage(pageIdx + 1)} disabled={pageIdx === pages.length - 1 || busy} className="p-1.5 rounded-lg hover:bg-gray-100" style={{ opacity: pageIdx === pages.length - 1 ? 0.3 : 1 }}>
+            <ChevronRight size={16} color={COLORS.textSecondary} />
+          </button>
+        </div>
+      )}
+
+      <div className="flex justify-center mb-3">
+        <div
+          ref={setBoxEl}
+          onPointerDown={startDraw}
+          onPointerMove={onMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+          style={{ position: "relative", width: "100%", maxWidth: 620, minHeight: 120, userSelect: "none", touchAction: "none", cursor: "crosshair", overflow: "hidden", borderRadius: 8, border: "1px solid rgba(0,0,0,0.15)", background: "#F5F5F7" }}
+        >
+          {imgUrl && <img src={imgUrl} alt="" draggable={false} style={{ width: "100%", display: "block", pointerEvents: "none" }} />}
+          {rect && rect.w > 0 && rect.h > 0 && (
+            <div
+              onPointerDown={startMove}
+              style={{ position: "absolute", left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.w * 100}%`, height: `${rect.h * 100}%`, border: `2px solid ${COLORS.blue}`, boxShadow: "0 0 0 9999px rgba(0,0,0,0.45)", cursor: "move", boxSizing: "border-box" }}
+            >
+              {CROP_HANDLES.map(({ mode, hx, hy, cursor }) => (
+                <div
+                  key={mode}
+                  onPointerDown={startResize(mode)}
+                  style={{ position: "absolute", left: `${hx * 100}%`, top: `${hy * 100}%`, width: 22, height: 22, marginLeft: -11, marginTop: -11, cursor, display: "flex", alignItems: "center", justifyContent: "center" }}
+                >
+                  <div style={{ width: 12, height: 12, background: "#fff", border: `2px solid ${COLORS.blue}`, borderRadius: 3 }} />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {err && <p className="text-xs mb-3" style={{ color: COLORS.red }}>{err}</p>}
+
+      <div className="flex flex-wrap gap-2">
+        <button onClick={onClose} disabled={busy} className="px-4 py-3 rounded-xl text-sm font-medium" style={{ color: COLORS.textSecondary }}>Vazgeç</button>
+        {hasCrop && (
+          <button onClick={onRemove} disabled={busy} className="px-4 py-3 rounded-xl text-sm font-semibold" style={{ color: COLORS.red, background: `${COLORS.red}12` }}>Şekli kaldır</button>
+        )}
+        <button onClick={apply} disabled={busy || !rect} className="flex-1 py-3 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.blue, opacity: (busy || !rect) ? 0.5 : 1 }}>
+          {busy ? "Kesiliyor..." : "Bu kutuyu kullan"}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
 function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImported }) {
   const [tab, setTab] = useState("ai");
   const [raw, setRaw] = useState("");
@@ -4803,6 +4968,7 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
   const [aiLevel, setAiLevel] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiMade, setAiMade] = useState(false);
+  const [cropEditing, setCropEditing] = useState(null);
 
   const getDefaults = () => ({ points: Number(String(points).replace(",", ".")), openPoints: Number(String(openPoints).replace(",", ".")) });
   const defaultsOk = (d) => !(isNaN(d.points) || d.points < 0 || isNaN(d.openPoints) || d.openPoints < 0);
@@ -5094,16 +5260,30 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
                     : q.answerSource === "unsure" ? { t: "Emin değil — mutlaka kontrol edin", c: COLORS.red } : null;
                   return (
                     <div key={i} className="rounded-xl px-4 py-2.5 flex gap-3" style={{ background: "rgba(0,0,0,0.03)" }}>
-                      {q.previewUrl && (
+                      {parsed.pages && (
                         <div className="flex-shrink-0" style={{ width: 84 }}>
-                          <img src={q.previewUrl} alt="" className="rounded-lg" style={{ width: 84, height: 64, objectFit: "contain", background: "#fff", border: "1px solid rgba(0,0,0,0.1)" }} />
-                          <button
-                            onClick={() => setParsed((pr) => ({ ...pr, questions: pr.questions.map((x, k) => (k === i ? { ...x, cropBlob: null, previewUrl: null } : x)) }))}
-                            className="text-xs mt-1 w-full text-center"
-                            style={{ color: COLORS.red }}
-                          >
-                            Görseli kaldır
-                          </button>
+                          {q.previewUrl ? (
+                            <>
+                              <img src={q.previewUrl} alt="" className="rounded-lg" style={{ width: 84, height: 64, objectFit: "contain", background: "#fff", border: "1px solid rgba(0,0,0,0.1)" }} />
+                              <div className="flex items-center justify-between mt-1">
+                                <button onClick={() => setCropEditing(i)} className="text-xs font-medium" style={{ color: COLORS.blue }}>Düzenle</button>
+                                <button
+                                  onClick={() => setParsed((pr) => {
+                                    if (pr.questions[i].previewUrl) URL.revokeObjectURL(pr.questions[i].previewUrl);
+                                    return { ...pr, questions: pr.questions.map((x, k) => (k === i ? { ...x, cropBlob: null, previewUrl: null } : x)) };
+                                  })}
+                                  className="text-xs"
+                                  style={{ color: COLORS.red }}
+                                >
+                                  Kaldır
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <button onClick={() => setCropEditing(i)} className="w-full text-xs font-medium rounded-lg" style={{ height: 64, color: COLORS.blue, border: "1.5px dashed rgba(0,113,227,0.4)", background: "rgba(0,113,227,0.04)" }}>
+                              + Şekil ekle
+                            </button>
+                          )}
                         </div>
                       )}
                       <div className="min-w-0 flex-1">
@@ -5145,6 +5325,30 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
             </button>
           </div>
         </>
+      )}
+      {cropEditing !== null && parsed && parsed.pages && parsed.questions[cropEditing] && (
+        <FigureCropEditor
+          pages={parsed.pages}
+          initial={parsed.questions[cropEditing].fig || null}
+          hasCrop={!!parsed.questions[cropEditing].cropBlob}
+          onClose={() => setCropEditing(null)}
+          onRemove={() => {
+            const idx = cropEditing;
+            setCropEditing(null);
+            setParsed((pr) => {
+              if (pr.questions[idx].previewUrl) URL.revokeObjectURL(pr.questions[idx].previewUrl);
+              return { ...pr, questions: pr.questions.map((x, k) => (k === idx ? { ...x, cropBlob: null, previewUrl: null } : x)) };
+            });
+          }}
+          onApply={(blob, fig) => {
+            const idx = cropEditing;
+            setCropEditing(null);
+            setParsed((pr) => {
+              if (pr.questions[idx].previewUrl) URL.revokeObjectURL(pr.questions[idx].previewUrl);
+              return { ...pr, questions: pr.questions.map((x, k) => (k === idx ? { ...x, cropBlob: blob, previewUrl: URL.createObjectURL(blob), fig } : x)) };
+            });
+          }}
+        />
       )}
     </ModalShell>
   );
