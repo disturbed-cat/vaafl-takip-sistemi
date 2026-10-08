@@ -4266,12 +4266,12 @@ const splitFillAnswers = (v) => {
   return arr.map((x) => String(x).trim()).filter(Boolean);
 };
 
-function parseImportJson(raw, defaults) {
+function parseImportJson(raw, defaults, lenient = false) {
   let data;
   try {
     data = JSON.parse(raw);
   } catch (e) {
-    return { questions: [], errors: ["JSON okunamadı. Dosyanın geçerli bir JSON olduğundan emin olun."] };
+    return { questions: [], errors: ["JSON okunamadı. Dosyanın geçerli bir JSON olduğundan emin olun."], warnings: [] };
   }
   const list = [];
   if (Array.isArray(data)) data.forEach((q) => list.push(q));
@@ -4281,9 +4281,9 @@ function parseImportJson(raw, defaults) {
     if (Array.isArray(data.writing)) data.writing.forEach((q) => list.push({ ...q, type: "open" }));
   }
   if (!list.length) {
-    return { questions: [], errors: ['Dosyada soru bulunamadı. Beklenen alanlar: "questions" ya da eski biçimdeki "mc" / "writing".'] };
+    return { questions: [], errors: ['Dosyada soru bulunamadı. Beklenen alanlar: "questions" ya da eski biçimdeki "mc" / "writing".'], warnings: [] };
   }
-  if (list.length > IMPORT_MAX) return { questions: [], errors: [`En fazla ${IMPORT_MAX} soru içe aktarılabilir (dosyada ${list.length} var).`] };
+  if (list.length > IMPORT_MAX) return { questions: [], errors: [`En fazla ${IMPORT_MAX} soru içe aktarılabilir (dosyada ${list.length} var).`], warnings: [] };
 
   const out = [];
   const errors = [];
@@ -4310,6 +4310,8 @@ function parseImportJson(raw, defaults) {
       passage: String(q.passage ?? "").trim() || null,
       image_url: q.image_url || q.imageUrl || null,
       options: null, min_words: null, max_words: null, points: pts, key: null,
+      src: i,
+      answerSource: ["key", "solved", "unsure"].includes(q.answer_source) ? q.answer_source : null,
     };
 
     if (type === "mc") {
@@ -4338,7 +4340,8 @@ function parseImportJson(raw, defaults) {
     }
     out.push(item);
   });
-  return { questions: out, errors };
+  if (lenient && out.length) return { questions: out, errors: [], warnings: errors };
+  return { questions: out, errors, warnings: [] };
 }
 
 function parseImportText(raw, defaults) {
@@ -4449,6 +4452,341 @@ const importKeySummary = (q) => {
   return q.min_words || q.max_words ? `Kelime: ${q.min_words || 0}–${q.max_words || "∞"}` : "Açık uçlu";
 };
 
+/* ------------------------------------------------------------------ */
+/* Fotoğraf / PDF'den soru çıkarma                                      */
+/* ------------------------------------------------------------------ */
+
+const VISION_MAX_PAGES = 12; // en fazla kaç sayfa eklenebilir
+const VISION_BATCH = 3; // yapay zekaya her seferinde kaç sayfa gönderilir
+const VISION_SENT_MAX = 1500; // yapay zekaya giden görüntünün uzun kenarı (piksel)
+const VISION_FULL_MAX = 2200; // şekil kesmek için saklanan görüntünün uzun kenarı (piksel)
+
+const PDFJS_SOURCES = [
+  { lib: "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js", worker: "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js" },
+  { lib: "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js", worker: "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js" },
+];
+
+// Yapay zekanın verdiği 0-1000 aralığındaki şekil konumunu gerçek piksel kutusuna çevirir (kenarlara küçük pay bırakır)
+function figureToRect(fig, W, H) {
+  const pad = 6;
+  const x0 = Math.max(0, fig.x - pad);
+  const y0 = Math.max(0, fig.y - pad);
+  const x1 = Math.min(1000, fig.x + fig.width + pad);
+  const y1 = Math.min(1000, fig.y + fig.height + pad);
+  const x = Math.min(W - 1, Math.round((x0 / 1000) * W));
+  const y = Math.min(H - 1, Math.round((y0 / 1000) * H));
+  const w = Math.max(1, Math.min(W - x, Math.round(((x1 - x0) / 1000) * W)));
+  const h = Math.max(1, Math.min(H - y, Math.round(((y1 - y0) / 1000) * H)));
+  return { x, y, w, h };
+}
+
+function loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => resolve(true);
+    s.onerror = () => { s.remove(); reject(new Error("script")); };
+    document.head.appendChild(s);
+  });
+}
+
+const getPdfJsGlobal = () => Reflect.get(window, "pdfjsLib");
+
+async function loadPdfJs() {
+  if (getPdfJsGlobal()) return getPdfJsGlobal();
+  for (const src of PDFJS_SOURCES) {
+    try {
+      await loadScriptOnce(src.lib);
+      const lib = getPdfJsGlobal();
+      if (lib) {
+        lib.GlobalWorkerOptions.workerSrc = src.worker;
+        return lib;
+      }
+    } catch (e) {
+      /* bir sonraki kaynağı dene */
+    }
+  }
+  throw new Error("pdf");
+}
+
+function newWhiteCanvas(w, h) {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(w));
+  canvas.height = Math.max(1, Math.round(h));
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  return { canvas, ctx };
+}
+
+// Bir tuvali "sayfa" nesnesine çevirir: yapay zekaya gidecek küçük JPEG, küçük resim ve kesim için saklanan büyük görüntü
+function canvasToPage(canvas, name) {
+  return new Promise((resolve, reject) => {
+    const sScale = Math.min(1, VISION_SENT_MAX / Math.max(canvas.width, canvas.height));
+    const sent = newWhiteCanvas(canvas.width * sScale, canvas.height * sScale);
+    sent.ctx.drawImage(canvas, 0, 0, sent.canvas.width, sent.canvas.height);
+    const sentUrl = sent.canvas.toDataURL("image/jpeg", 0.82);
+
+    const tScale = Math.min(1, 220 / Math.max(canvas.width, canvas.height));
+    const thumb = newWhiteCanvas(canvas.width * tScale, canvas.height * tScale);
+    thumb.ctx.drawImage(canvas, 0, 0, thumb.canvas.width, thumb.canvas.height);
+
+    canvas.toBlob((blob) => {
+      if (!blob) return reject(new Error("blob"));
+      resolve({
+        id: examUuid(),
+        name,
+        fullBlob: blob,
+        thumb: thumb.canvas.toDataURL("image/jpeg", 0.7),
+        sent: { media_type: "image/jpeg", data: sentUrl.split(",")[1] },
+      });
+    }, "image/jpeg", 0.92);
+  });
+}
+
+async function imageFileToPage(file) {
+  let bmp = null;
+  try {
+    bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  } catch (e) {
+    try { bmp = await createImageBitmap(file); } catch (e2) { bmp = null; }
+  }
+  if (!bmp) throw new Error("decode");
+  const scale = Math.min(1, VISION_FULL_MAX / Math.max(bmp.width, bmp.height));
+  const { canvas, ctx } = newWhiteCanvas(bmp.width * scale, bmp.height * scale);
+  ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  if (bmp.close) bmp.close();
+  return canvasToPage(canvas, file.name);
+}
+
+async function pdfFileToPages(file, limit) {
+  const pdfjs = await loadPdfJs();
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjs.getDocument({ data: buf }).promise;
+  const pages = [];
+  const total = Math.min(pdf.numPages, limit);
+  for (let n = 1; n <= total; n++) {
+    const pg = await pdf.getPage(n);
+    const base = pg.getViewport({ scale: 1 });
+    const scale = Math.min(3, VISION_FULL_MAX / Math.max(base.width, base.height));
+    const vp = pg.getViewport({ scale });
+    const { canvas, ctx } = newWhiteCanvas(vp.width, vp.height);
+    await pg.render({ canvasContext: ctx, viewport: vp }).promise;
+    pages.push(await canvasToPage(canvas, `${file.name} · s.${n}`));
+  }
+  return { pages, truncated: pdf.numPages > limit };
+}
+
+// Sayfa görüntüsünden yapay zekanın gösterdiği bölgeyi keser
+async function cropFromBlob(blob, fig) {
+  const bmp = await createImageBitmap(blob);
+  const r = figureToRect(fig, bmp.width, bmp.height);
+  const { canvas, ctx } = newWhiteCanvas(r.w, r.h);
+  ctx.drawImage(bmp, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+  if (bmp.close) bmp.close();
+  const usePng = r.w * r.h < 1200000;
+  const out = [];
+  await new Promise((resolve) => canvas.toBlob((b) => { out.push(b); resolve(true); }, usePng ? "image/png" : "image/jpeg", 0.92));
+  return out[0];
+}
+
+async function readInvokeError(error) {
+  try {
+    const b = await error.context.json();
+    if (b?.error) return b.error;
+  } catch (e) { /* gövde okunamadı */ }
+  return "Sunucu yanıt vermedi (zaman aşımı olabilir). Daha az sayfayla tekrar deneyin.";
+}
+
+// Sayfaları gruplar halinde yapay zekaya gönderir, soruları ve şekil konumlarını toplar, şekilleri keser.
+// invoke ve crop dışarıdan verilir (gerçek sunucu / gerçek tuval), böylece mantık ayrı test edilebilir.
+async function runVisionExtraction({ pages, lang, level, defaults, invoke, crop, onProgress }) {
+  const batches = [];
+  for (let i = 0; i < pages.length; i += VISION_BATCH) batches.push(pages.slice(i, i + VISION_BATCH));
+
+  const all = [];
+  const warnings = [];
+  for (let b = 0; b < batches.length; b++) {
+    const offset = b * VISION_BATCH;
+    onProgress(`İnceleniyor… (${b + 1}/${batches.length}) — bu işlem biraz sürebilir`);
+    const res = await invoke({ mode: "images", pages: batches[b].map((p) => p.sent), language: lang, level });
+    if (res.error) {
+      warnings.push(`Sayfa ${offset + 1}–${offset + batches[b].length} işlenemedi: ${res.error}`);
+      continue;
+    }
+    (res.questions || []).forEach((q) => {
+      const fig = q.figure ? { pageIndex: offset + q.figure.page - 1, x: q.figure.x, y: q.figure.y, width: q.figure.width, height: q.figure.height } : null;
+      all.push({ q, fig });
+    });
+  }
+
+  if (!all.length) return { error: warnings.length ? warnings.join(" ") : "Sayfalarda soru bulunamadı." };
+
+  onProgress("Şekiller hazırlanıyor…");
+  const clean = all.map((item) => { const { figure, ...rest } = item.q; return rest; });
+  const parsed = parseImportJson(JSON.stringify({ questions: clean }), defaults, true);
+  for (const pq of parsed.questions) {
+    const fig = all[pq.src] ? all[pq.src].fig : null;
+    if (!fig || !pages[fig.pageIndex]) continue;
+    try {
+      const blob = await crop(pages[fig.pageIndex], fig);
+      if (blob) { pq.cropBlob = blob; pq.previewUrl = URL.createObjectURL(blob); }
+    } catch (e) {
+      warnings.push(`${pq.src + 1}. sorunun şekli kesilemedi.`);
+    }
+  }
+  parsed.warnings = [...warnings, ...(parsed.warnings || [])];
+  return { parsed };
+}
+
+function ExamVisionPane({ getDefaults, onParsed, onBusy }) {
+  const [pages, setPages] = useState([]);
+  const [lang, setLang] = useState("auto");
+  const [level, setLevel] = useState("");
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [err, setErr] = useState("");
+  const [notes, setNotes] = useState([]);
+  const busy = loadingFiles || running;
+
+  const setBusyAll = (v, kind) => {
+    if (kind === "files") setLoadingFiles(v);
+    else setRunning(v);
+    if (onBusy) onBusy(v);
+  };
+
+  const addFiles = async (fileList) => {
+    const files = [];
+    for (let k = 0; fileList && k < fileList.length; k++) files.push(fileList[k]);
+    if (!files.length) return;
+    setErr("");
+    setNotes([]);
+    setBusyAll(true, "files");
+    const next = [...pages];
+    const problems = [];
+    for (const f of files) {
+      if (next.length >= VISION_MAX_PAGES) { problems.push(`En fazla ${VISION_MAX_PAGES} sayfa eklenebilir.`); break; }
+      try {
+        if (f.type === "application/pdf" || /\.pdf$/i.test(f.name)) {
+          const { pages: pp, truncated } = await pdfFileToPages(f, VISION_MAX_PAGES - next.length);
+          next.push(...pp);
+          if (truncated) problems.push(`${f.name}: yalnızca ilk ${pp.length} sayfa eklendi.`);
+        } else if (f.type.startsWith("image/")) {
+          next.push(await imageFileToPage(f));
+        } else {
+          problems.push(`${f.name}: desteklenmeyen dosya türü (fotoğraf ya da PDF yükleyin).`);
+        }
+      } catch (e) {
+        if (e && e.message === "pdf") problems.push(`${f.name}: PDF okuyucu yüklenemedi. İnternet bağlantınızı kontrol edin ya da sayfaları fotoğraf olarak ekleyin.`);
+        else if (e && e.message === "decode") problems.push(`${f.name}: görsel okunamadı (HEIC gibi biçimler desteklenmeyebilir, JPG ya da PNG deneyin).`);
+        else problems.push(`${f.name}: dosya işlenemedi.`);
+      }
+    }
+    setPages(next);
+    setNotes(problems);
+    setBusyAll(false, "files");
+  };
+
+  const removePage = (i) => setPages((p) => p.filter((_, k) => k !== i));
+  const movePage = (i, dir) => setPages((p) => {
+    const j = i + dir;
+    if (j < 0 || j >= p.length) return p;
+    const a = [...p];
+    [a[i], a[j]] = [a[j], a[i]];
+    return a;
+  });
+
+  const run = async () => {
+    setErr("");
+    setNotes([]);
+    if (!pages.length) return setErr("Önce en az bir sayfa ekleyin.");
+    const defaults = getDefaults();
+    if (!defaults) return setErr("Puan değerleri 0 veya daha büyük bir sayı olmalı.");
+
+    setBusyAll(true, "run");
+    const invoke = async (body) => {
+      const { data, error } = await supabase.functions.invoke("ai-exam-import", { body });
+      if (error) return { error: await readInvokeError(error) };
+      if (data && data.error) return { error: data.error };
+      return { questions: (data && data.questions) || [] };
+    };
+    const result = await runVisionExtraction({
+      pages, lang, level, defaults, invoke,
+      crop: (page, fig) => cropFromBlob(page.fullBlob, fig),
+      onProgress: setProgress,
+    });
+    setBusyAll(false, "run");
+    setProgress("");
+    if (result.error) return setErr(result.error);
+    onParsed(result.parsed);
+  };
+
+  return (
+    <div>
+      <p className="text-xs mb-3" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>
+        Sınav kağıdının fotoğraflarını ya da PDF'ini yükleyin. Yapay zeka sayfalardaki soruları okur, şekil ve grafikleri sorunun yanına ekler.
+        Sonucu önizlemede kontrol edip sınava eklersiniz. En fazla {VISION_MAX_PAGES} sayfa eklenebilir.
+      </p>
+
+      <label className="flex items-center justify-center gap-2 py-6 rounded-xl text-sm font-medium cursor-pointer mb-3" style={{ border: "1.5px dashed rgba(0,0,0,0.18)", color: COLORS.textSecondary, background: "#FAFAFA", opacity: busy ? 0.6 : 1 }}>
+        {loadingFiles ? "Sayfalar hazırlanıyor…" : "Fotoğraf ya da PDF seç (birden fazla seçebilirsiniz)"}
+        <input type="file" multiple accept="image/*,application/pdf,.pdf" disabled={busy} className="hidden" onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
+      </label>
+
+      {notes.length > 0 && (
+        <ul className="text-xs pl-4 mb-3" style={{ listStyle: "disc", color: COLORS.orange, lineHeight: 1.7 }}>
+          {notes.map((n, i) => <li key={i}>{n}</li>)}
+        </ul>
+      )}
+
+      {pages.length > 0 && (
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-3 mb-4">
+          {pages.map((p, i) => (
+            <div key={p.id} className="rounded-xl overflow-hidden" style={{ border: "1px solid rgba(0,0,0,0.1)", background: "#fff" }}>
+              <div className="relative" style={{ background: "#F5F5F7" }}>
+                <img src={p.thumb} alt="" style={{ width: "100%", height: 120, objectFit: "contain" }} />
+                <span className="absolute top-1.5 left-1.5 text-xs font-bold px-1.5 py-0.5 rounded-md" style={{ background: "rgba(0,0,0,0.65)", color: "#fff" }}>{i + 1}</span>
+              </div>
+              <div className="flex items-center justify-between px-1.5 py-1">
+                <button onClick={() => movePage(i, -1)} disabled={busy || i === 0} className="p-1 rounded hover:bg-gray-100" style={{ opacity: i === 0 ? 0.3 : 1 }} title="Öne al">
+                  <ChevronLeft size={14} color={COLORS.textSecondary} />
+                </button>
+                <button onClick={() => removePage(i)} disabled={busy} className="p-1 rounded hover:bg-gray-100" title="Kaldır">
+                  <X size={14} color={COLORS.red} />
+                </button>
+                <button onClick={() => movePage(i, 1)} disabled={busy || i === pages.length - 1} className="p-1 rounded hover:bg-gray-100" style={{ opacity: i === pages.length - 1 ? 0.3 : 1 }} title="Sona al">
+                  <ChevronRight size={14} color={COLORS.textSecondary} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <FormSelect label="Soruların dili" value={lang} onChange={(e) => setLang(e.target.value)}>
+          <option value="auto">Sayfadaki dil</option>
+          <option value="tr">Türkçe</option>
+          <option value="en">İngilizce</option>
+        </FormSelect>
+        <FormInput label="Ders / düzey notu (opsiyonel)" placeholder="Örn. 10. sınıf fizik, optik ünitesi" value={level} onChange={(e) => setLevel(e.target.value)} maxLength={300} />
+      </div>
+
+      {err && <p className="text-xs mb-3" style={{ color: COLORS.red, lineHeight: 1.6 }}>{err}</p>}
+
+      <button onClick={run} disabled={busy || !pages.length} className="w-full py-3 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.indigo, opacity: (busy || !pages.length) ? 0.6 : 1 }}>
+        {running ? (
+          <span className="inline-flex items-center gap-2">
+            <span className="spin-anim inline-block w-3.5 h-3.5 rounded-full border-2 border-white" style={{ borderTopColor: "transparent" }} />
+            {progress || "İnceleniyor…"}
+          </span>
+        ) : `Soruları Çıkar (${pages.length} sayfa)`}
+      </button>
+    </div>
+  );
+}
+
 function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImported }) {
   const [tab, setTab] = useState("ai");
   const [raw, setRaw] = useState("");
@@ -4519,7 +4857,7 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
     }
     if (data?.error) return setError(data.error);
     setAiMade(true);
-    setParsed(parseImportJson(JSON.stringify({ questions: data.questions }), defaults));
+    setParsed(parseImportJson(JSON.stringify({ questions: data.questions }), defaults, true));
   };
 
   const doImport = async () => {
@@ -4542,17 +4880,32 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
       oldIds = (old || []).map((q) => q.id);
     }
 
+    const uploadedPaths = [];
+    const urls = {};
+    const cleanupUploads = async () => { if (uploadedPaths.length) await supabase.storage.from("uploads").remove(uploadedPaths); };
+    for (let i = 0; i < parsed.questions.length; i++) {
+      const cq = parsed.questions[i];
+      if (!cq.cropBlob) continue;
+      const ext = cq.cropBlob.type === "image/png" ? "png" : "jpg";
+      const path = `exams/${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+      const { error: upErr } = await supabase.storage.from("uploads").upload(path, cq.cropBlob, { contentType: cq.cropBlob.type, cacheControl: "3600", upsert: false });
+      if (upErr) { await cleanupUploads(); setImporting(false); return setError("Şekil görseli yüklenemedi: " + upErr.message); }
+      uploadedPaths.push(path);
+      urls[i] = supabase.storage.from("uploads").getPublicUrl(path).data.publicUrl;
+    }
+
     const rows = parsed.questions.map((q, i) => ({
       id: examUuid(), exam_id: examId, position: nextPosition + i, type: q.type, text: q.text, passage: q.passage,
-      image_url: q.image_url, options: q.options, points: q.points, min_words: q.min_words, max_words: q.max_words,
+      image_url: urls[i] || q.image_url, options: q.options, points: q.points, min_words: q.min_words, max_words: q.max_words,
     }));
     const { error: e1 } = await supabase.from("exam_questions").insert(rows);
-    if (e1) { setImporting(false); return setError("Sorular eklenemedi: " + e1.message); }
+    if (e1) { await cleanupUploads(); setImporting(false); return setError("Sorular eklenemedi: " + e1.message); }
 
     const keyRows = parsed.questions.map((q, i) => ({ question_id: rows[i].id, correct: q.key }));
     const { error: e2 } = await supabase.from("exam_keys").insert(keyRows);
     if (e2) {
       await supabase.from("exam_questions").delete().in("id", rows.map((r) => r.id));
+      await cleanupUploads();
       setImporting(false);
       return setError("Doğru cevaplar kaydedilemedi, hiçbir soru eklenmedi: " + e2.message);
     }
@@ -4571,7 +4924,7 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
       {!parsed && (
         <>
           <div className="flex flex-wrap gap-2 mb-4">
-            {[["ai", "Yapay Zeka ile Oluştur"], ["text", "Metin yapıştır"], ["json", "JSON dosyası"]].map(([id, label]) => (
+            {[["ai", "Yapay Zeka (Metin)"], ["vision", "Fotoğraf / PDF"], ["text", "Metin yapıştır"], ["json", "JSON dosyası"]].map(([id, label]) => (
               <button
                 key={id}
                 onClick={() => { setTab(id); setError(""); }}
@@ -4620,6 +4973,14 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
             </>
           )}
 
+          {tab === "vision" && (
+            <ExamVisionPane
+              getDefaults={() => { const d = getDefaults(); return defaultsOk(d) ? d : null; }}
+              onBusy={setAiLoading}
+              onParsed={(p) => { setAiMade(true); setParsed(p); }}
+            />
+          )}
+
           {tab === "json" && (
             <div className="flex items-center gap-3 mb-3">
               <label className="px-3.5 py-2 rounded-xl text-xs font-semibold cursor-pointer" style={{ color: COLORS.blue, background: `${COLORS.blue}12` }}>
@@ -4630,7 +4991,7 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
             </div>
           )}
 
-          {tab !== "ai" && (
+          {(tab === "text" || tab === "json") && (
             <>
               <textarea
                 value={raw}
@@ -4687,7 +5048,7 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
                   </span>
                 ) : "Soruları Oluştur"}
               </button>
-            ) : (
+            ) : tab === "vision" ? null : (
               <button onClick={check} className="flex-1 py-3 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.blue }}>Kontrol Et</button>
             )}
           </div>
@@ -4699,6 +5060,15 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
           {aiMade && (
             <div className="rounded-xl px-4 py-3 mb-4 text-xs" style={{ background: `${COLORS.orange}15`, color: COLORS.text, lineHeight: 1.6 }}>
               <b>Bu sorular yapay zeka tarafından hazırlandı.</b> Soru metinlerini ve yeşil yazılı doğru cevapları içe aktarmadan önce mutlaka kontrol edin. İçe aktardıktan sonra da her soruyu düzenleyebilirsiniz.
+            </div>
+          )}
+          {(parsed.warnings || []).length > 0 && (
+            <div className="rounded-xl px-4 py-3 mb-4 text-xs" style={{ background: `${COLORS.orange}12`, color: COLORS.text, lineHeight: 1.6 }}>
+              <b>{parsed.warnings.length} uyarı:</b>
+              <ul className="pl-4 mt-1" style={{ listStyle: "disc" }}>
+                {parsed.warnings.slice(0, 8).map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+              {parsed.warnings.length > 8 && <p className="mt-1" style={{ color: COLORS.textSecondary }}>... ve {parsed.warnings.length - 8} uyarı daha.</p>}
             </div>
           )}
           {parsed.errors.length > 0 ? (
@@ -4718,19 +5088,39 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
                 ))}
               </div>
               <div className="flex flex-col gap-2 mb-4" style={{ maxHeight: 340, overflowY: "auto" }}>
-                {parsed.questions.slice(0, 80).map((q, i) => (
-                  <div key={i} className="rounded-xl px-4 py-2.5" style={{ background: "rgba(0,0,0,0.03)" }}>
-                    <div className="flex items-center gap-2 mb-0.5">
-                      <span className="text-xs font-bold" style={{ color: COLORS.blue }}>{i + 1}.</span>
-                      <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: `${COLORS.indigo}15`, color: COLORS.indigo }}>{QUESTION_TYPE_LABEL[q.type]}</span>
-                      <span className="text-xs" style={{ color: COLORS.textSecondary }}>{q.points} puan</span>
-                      {q.passage && <span className="text-xs" style={{ color: COLORS.textSecondary }}>· okuma metni</span>}
-                      {q.image_url && <span className="text-xs" style={{ color: COLORS.textSecondary }}>· görsel</span>}
+                {parsed.questions.slice(0, 80).map((q, i) => {
+                  const badge = q.answerSource === "key" ? { t: "Cevap anahtarından", c: COLORS.green }
+                    : q.answerSource === "solved" ? { t: "Yapay zeka çözdü — kontrol edin", c: COLORS.orange }
+                    : q.answerSource === "unsure" ? { t: "Emin değil — mutlaka kontrol edin", c: COLORS.red } : null;
+                  return (
+                    <div key={i} className="rounded-xl px-4 py-2.5 flex gap-3" style={{ background: "rgba(0,0,0,0.03)" }}>
+                      {q.previewUrl && (
+                        <div className="flex-shrink-0" style={{ width: 84 }}>
+                          <img src={q.previewUrl} alt="" className="rounded-lg" style={{ width: 84, height: 64, objectFit: "contain", background: "#fff", border: "1px solid rgba(0,0,0,0.1)" }} />
+                          <button
+                            onClick={() => setParsed((pr) => ({ ...pr, questions: pr.questions.map((x, k) => (k === i ? { ...x, cropBlob: null, previewUrl: null } : x)) }))}
+                            className="text-xs mt-1 w-full text-center"
+                            style={{ color: COLORS.red }}
+                          >
+                            Görseli kaldır
+                          </button>
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2 mb-0.5">
+                          <span className="text-xs font-bold" style={{ color: COLORS.blue }}>{i + 1}.</span>
+                          <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: `${COLORS.indigo}15`, color: COLORS.indigo }}>{QUESTION_TYPE_LABEL[q.type]}</span>
+                          <span className="text-xs" style={{ color: COLORS.textSecondary }}>{q.points} puan</span>
+                          {q.passage && <span className="text-xs" style={{ color: COLORS.textSecondary }}>· okuma metni</span>}
+                          {q.image_url && <span className="text-xs" style={{ color: COLORS.textSecondary }}>· görsel</span>}
+                          {badge && <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: `${badge.c}18`, color: badge.c }}>{badge.t}</span>}
+                        </div>
+                        <p className="text-sm whitespace-pre-wrap" style={{ color: COLORS.text, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{q.text}</p>
+                        <p className="text-xs mt-0.5" style={{ color: COLORS.green }}>{importKeySummary(q)}</p>
+                      </div>
                     </div>
-                    <p className="text-sm whitespace-pre-wrap" style={{ color: COLORS.text, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{q.text}</p>
-                    <p className="text-xs mt-0.5" style={{ color: COLORS.green }}>{importKeySummary(q)}</p>
-                  </div>
-                ))}
+                  );
+                })}
                 {total > 80 && <p className="text-xs text-center py-1" style={{ color: COLORS.textSecondary }}>... ve {total - 80} soru daha (hepsi eklenecek).</p>}
               </div>
               <ExamToggle
