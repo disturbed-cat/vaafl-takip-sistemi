@@ -198,6 +198,7 @@ const TC_NAV = [
   { id: "exams", label: "Sınavlar", icon: BookOpen },
   { id: "targets", label: "Hedefler", icon: Target },
   { id: "verify", label: "Doğrulama", icon: ClipboardCheck },
+  { id: "analysis", label: "Öğrenci Analizi", icon: TrendingUp },
 ];
 
 const CN_NAV = [
@@ -205,6 +206,7 @@ const CN_NAV = [
   { id: "classes", label: "Sınıflar", icon: School },
   { id: "students", label: "Öğrenciler", icon: Users },
   { id: "coaching", label: "Koçlar", icon: Compass },
+  { id: "analysis", label: "Öğrenci Analizi", icon: TrendingUp },
 ];
 
 const PROGRESS_NAV = [
@@ -2515,6 +2517,7 @@ function QuestionModal({ examId, question, correct, position, onClose, onSaved }
   const [type, setType] = useState(question?.type || "mc");
   const [text, setText] = useState(question?.text || "");
   const [passage, setPassage] = useState(question?.passage || "");
+  const [topic, setTopic] = useState(question?.topic || "");
   const [imageUrl, setImageUrl] = useState(question?.image_url || "");
   const [points, setPoints] = useState(question?.points ?? 1);
   const [options, setOptions] = useState(question?.type === "mc" && Array.isArray(question.options) ? [...question.options] : ["", "", "", ""]);
@@ -2553,7 +2556,7 @@ function QuestionModal({ examId, question, correct, position, onClose, onSaved }
     const pts = Number(String(points).replace(",", "."));
     if (isNaN(pts) || pts < 0) return setError("Puan 0 veya daha büyük bir sayı olmalı.");
 
-    const row = { exam_id: examId, type, text: text.trim(), passage: passage.trim() || null, image_url: imageUrl || null, points: pts, options: null, min_words: null, max_words: null };
+    const row = { exam_id: examId, type, text: text.trim(), topic: topic.trim() || null, passage: passage.trim() || null, image_url: imageUrl || null, points: pts, options: null, min_words: null, max_words: null };
     let key = null;
     if (type === "mc") {
       const opts = options.map((o) => o.trim());
@@ -2706,6 +2709,7 @@ function QuestionModal({ examId, question, correct, position, onClose, onSaved }
         </>
       )}
 
+      <FormInput label="Konu (opsiyonel — boşsa sınavın konusu kullanılır)" placeholder="Örn. Mol Kavramı" value={topic} onChange={(e) => setTopic(e.target.value)} />
       <div style={{ maxWidth: 140 }}>
         <FormInput label="Puan" type="number" min="0" step="0.5" value={points} onChange={(e) => setPoints(e.target.value)} />
       </div>
@@ -2726,7 +2730,7 @@ function ExamEditor({ examId, currentUser, onBack }) {
   const [id, setId] = useState(examId);
   const [loading, setLoading] = useState(!!examId);
   const [form, setForm] = useState({
-    title: "", subject: "", description: "", duration: 40,
+    title: "", subject: "", topic: "", description: "", duration: 40,
     shuffleQ: true, shuffleO: true, blockPaste: true, showResult: false,
     useLevels: false, levels: { ...DEFAULT_LEVELS },
   });
@@ -2756,7 +2760,7 @@ function ExamEditor({ examId, currentUser, onBack }) {
       const { data: ex, error } = await supabase.from("exams").select("*").eq("id", examId).single();
       if (error || !ex) { setNotice({ ok: false, text: "Sınav yüklenemedi." }); setLoading(false); return; }
       setForm({
-        title: ex.title, subject: ex.subject || "", description: ex.description || "", duration: ex.duration_minutes,
+        title: ex.title, subject: ex.subject || "", topic: ex.topic || "", description: ex.description || "", duration: ex.duration_minutes,
         shuffleQ: ex.shuffle_questions, shuffleO: ex.shuffle_options, blockPaste: ex.block_paste, showResult: ex.show_result,
         useLevels: !!ex.levels, levels: ex.levels || { ...DEFAULT_LEVELS },
       });
@@ -2781,7 +2785,7 @@ function ExamEditor({ examId, currentUser, onBack }) {
       levels = L;
     }
     const payload = {
-      title: form.title.trim(), subject: form.subject.trim() || null, description: form.description.trim() || null,
+      title: form.title.trim(), subject: form.subject.trim() || null, topic: form.topic.trim() || null, description: form.description.trim() || null,
       duration_minutes: dur, shuffle_questions: form.shuffleQ, shuffle_options: form.shuffleO,
       block_paste: form.blockPaste, show_result: form.showResult, levels,
     };
@@ -2847,14 +2851,14 @@ function ExamEditor({ examId, currentUser, onBack }) {
         <datalist id="exam-subjects">
           {[...MAIN_SUBJECTS, ...ELECTIVE_SUBJECTS].map((s) => <option key={s} value={s} />)}
         </datalist>
+        <FormInput label="Konu / ünite (opsiyonel)" placeholder="Örn. Optik, Mol Kavramı" value={form.topic} onChange={(e) => setField("topic", e.target.value)} />
         <FormInput label="Açıklama / yönerge (opsiyonel)" placeholder="Öğrencilerin başlamadan önce göreceği kısa not" value={form.description} onChange={(e) => setField("description", e.target.value)} />
 
         <div style={{ borderTop: "1px solid rgba(0,0,0,0.06)" }} className="pt-2">
           <ExamToggle checked={form.shuffleQ} onChange={(v) => setField("shuffleQ", v)} title="Soruları karıştır" desc="Her öğrenciye sorular farklı sırada gelir. Açık uçlu sorular her zaman sonda kalır." />
           <ExamToggle checked={form.shuffleO} onChange={(v) => setField("shuffleO", v)} title="Şıkları karıştır" desc="Çoktan seçmeli sorularda şık sırası her öğrenci için farklı olur." />
           <ExamToggle checked={form.blockPaste} onChange={(v) => setField("blockPaste", v)} title="Yazma sorularında yapıştırmayı kapat" desc="Öğrenci cevabını kopyalayıp yapıştıramaz." />
-          <ExamToggle checked={form.showResult} onChange={(v) => setField("showResult", v)} title="Sonucu öğrenciye göster" desc="Puanlama tamamlandıktan sonra öğrenci kendi puanını görür." />
-          <ExamToggle checked={form.useLevels} onChange={(v) => setField("useLevels", v)} title="Seviye hesapla (A1–C1)" desc="İngilizce seviye tespit sınavları için. Toplam puanın yüzdesine göre seviye atanır." />
+          <ExamToggle checked={form.showResult} onChange={(v) => setField("showResult", v)} title="Sonucu öğrenciye ve veliye göster" desc="Puanlama tamamlandıktan sonra öğrenci ve velisi puanı görür. Kapalıysa yalnızca 'Tamamladı' bilgisi görünür." />          <ExamToggle checked={form.useLevels} onChange={(v) => setField("useLevels", v)} title="Seviye hesapla (A1–C1)" desc="İngilizce seviye tespit sınavları için. Toplam puanın yüzdesine göre seviye atanır." />
         </div>
 
         {form.useLevels && (
@@ -2899,6 +2903,7 @@ function ExamEditor({ examId, currentUser, onBack }) {
                     <span className="text-xs" style={{ color: COLORS.textSecondary }}>{Number(q.points)} puan</span>
                     {q.passage && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(0,0,0,0.05)", color: COLORS.textSecondary }}>Okuma metni</span>}
                     {q.image_url && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(0,0,0,0.05)", color: COLORS.textSecondary }}>Görsel</span>}
+                    {q.topic && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: `${COLORS.teal}15`, color: COLORS.teal }}>{q.topic}</span>}
                   </div>
                   <p className="text-sm whitespace-pre-wrap" style={{ color: COLORS.text }}>{q.text}</p>
                   {q.image_url && <img src={q.image_url} alt="" className="mt-2 rounded-lg" style={{ maxHeight: 120, objectFit: "contain", border: "1px solid rgba(0,0,0,0.08)", background: "#fff" }} />}
@@ -4312,6 +4317,7 @@ function parseImportJson(raw, defaults, lenient = false) {
       options: null, min_words: null, max_words: null, points: pts, key: null,
       src: i,
       answerSource: ["key", "solved", "unsure"].includes(q.answer_source) ? q.answer_source : null,
+      topic: String(q.topic ?? "").trim() || null,
     };
 
     if (type === "mc") {
@@ -5062,7 +5068,7 @@ function ExamImportModal({ examId, existingCount, nextPosition, onClose, onImpor
 
     const rows = parsed.questions.map((q, i) => ({
       id: examUuid(), exam_id: examId, position: nextPosition + i, type: q.type, text: q.text, passage: q.passage,
-      image_url: urls[i] || q.image_url, options: q.options, points: q.points, min_words: q.min_words, max_words: q.max_words,
+      image_url: urls[i] || q.image_url, topic: q.topic, options: q.options, points: q.points, min_words: q.min_words, max_words: q.max_words,
     }));
     const { error: e1 } = await supabase.from("exam_questions").insert(rows);
     if (e1) { await cleanupUploads(); setImporting(false); return setError("Sorular eklenemedi: " + e1.message); }
@@ -5371,6 +5377,478 @@ function ExamImportButton({ examId, existingCount, nextPosition, onImported }) {
         />
       )}
     </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Sınavlar (veli)                                                      */
+/* ------------------------------------------------------------------ */
+
+// Velinin göreceği durum: öğrencinin kartından farklı olarak "başlat" eylemi yok
+function parentExamStatus(ex, now = Date.now()) {
+  const hasScore = ex.show_result && ex.approved && ex.total_score !== null && ex.total_score !== undefined && Number(ex.max_score) > 0;
+  const pct = hasScore ? Math.round((Number(ex.total_score) / Number(ex.max_score)) * 100) : null;
+  if (ex.attempt_status === "bitti") {
+    if (!ex.approved) return { kind: "wait", label: "Değerlendiriliyor", tone: "indigo", pct: null };
+    if (hasScore) return { kind: "result", label: "Sonuçlandı", tone: "green", pct };
+    return { kind: "done", label: "Tamamladı", tone: "green", pct: null };
+  }
+  if (ex.attempt_status === "devam") return { kind: "going", label: "Şu an sınavda", tone: "orange", pct: null };
+  if (ex.is_open) return { kind: "open", label: "Sınav açık, henüz girmedi", tone: "orange", pct: null };
+  if (ex.opens_at && Date.parse(ex.opens_at) > now) return { kind: "soon", label: "Henüz açılmadı", tone: "gray", pct: null };
+  return { kind: "closed", label: "Kapalı", tone: "gray", pct: null };
+}
+
+// Üstteki özet: kaç sınav sonuçlandı, ortalama yüzde
+function summarizeParentExams(rows, now = Date.now()) {
+  const sts = rows.map((r) => parentExamStatus(r, now));
+  const results = sts.filter((s) => s.kind === "result");
+  const avg = results.length ? Math.round(results.reduce((a, s) => a + s.pct, 0) / results.length) : null;
+  return {
+    total: rows.length,
+    resulted: results.length,
+    waiting: sts.filter((s) => s.kind === "wait").length,
+    avg,
+  };
+}
+
+const parentToneColor = (tone) => (tone === "green" ? COLORS.green : tone === "indigo" ? COLORS.indigo : tone === "orange" ? COLORS.orange : COLORS.textSecondary);
+
+function ParentExamsTab({ child }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const load = async () => {
+    const { data, error: err } = await supabase.rpc("get_child_exams");
+    if (err) setError("Sınavlar yüklenemedi: " + err.message);
+    else { setRows((data || []).filter((r) => r.student_id === child.id)); setError(""); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, [child.id]);
+
+  const sum = summarizeParentExams(rows);
+
+  return (
+    <div>
+      {error && <p className="text-xs mb-3" style={{ color: COLORS.red }}>{error}</p>}
+      {loading && <div className="py-14 text-center text-sm" style={{ color: COLORS.textSecondary }}>Yükleniyor...</div>}
+
+      {!loading && rows.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-5 stagger-grid">
+          <StatCard label="Sınav" value={sum.total} icon={BookOpen} color={COLORS.blue} />
+          <StatCard label="Sonuçlanan" value={sum.resulted} icon={CheckCircle2} color={COLORS.green} />
+          <StatCard label="Ortalama" value={sum.avg === null ? "—" : `%${sum.avg}`} icon={TrendingUp} color={COLORS.indigo} />
+        </div>
+      )}
+
+      {!loading && rows.length === 0 && !error && (
+        <div className="rounded-2xl py-14 text-center text-sm" style={{ ...glassCard, color: COLORS.textSecondary }}>
+          {child.name} için atanmış bir sınav yok
+        </div>
+      )}
+
+      <div className="flex flex-col gap-3">
+        {rows.map((ex) => {
+          const st = parentExamStatus(ex);
+          const color = parentToneColor(st.tone);
+          return (
+            <div key={ex.assignment_id} className="rounded-2xl p-5" style={glassCard}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-base font-semibold truncate" style={{ color: COLORS.text }}>{ex.title}</div>
+                  <div className="text-xs" style={{ color: COLORS.textSecondary }}>
+                    {ex.subject || "Sınav"} · {ex.question_count} soru · {ex.duration_minutes} dk
+                    {ex.submitted_at ? ` · ${fmtExamDate(ex.submitted_at)}` : ""}
+                  </div>
+                </div>
+                <span className="text-xs font-medium px-2.5 py-1 rounded-full flex-shrink-0" style={{ background: `${color}18`, color }}>{st.label}</span>
+              </div>
+
+              {st.kind === "result" && (
+                <div className="mt-4">
+                  <div className="flex items-baseline justify-between mb-1.5">
+                    <span className="text-lg font-semibold" style={{ color: COLORS.text }}>
+                      {fmtScore(ex.total_score)} <span className="text-sm font-normal" style={{ color: COLORS.textSecondary }}>/ {fmtScore(ex.max_score)}</span>
+                    </span>
+                    <span className="flex items-center gap-2">
+                      {ex.level && <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: `${COLORS.indigo}15`, color: COLORS.indigo }}>Seviye {ex.level}</span>}
+                      <span className="text-sm font-semibold" style={{ color: COLORS.blue }}>%{st.pct}</span>
+                    </span>
+                  </div>
+                  <div className="w-full rounded-full h-2" style={{ background: "rgba(0,0,0,0.06)" }}>
+                    <div className="h-2 rounded-full" style={{ width: `${Math.min(100, st.pct)}%`, background: COLORS.blue }} />
+                  </div>
+                </div>
+              )}
+              {st.kind === "done" && <p className="text-xs mt-3" style={{ color: COLORS.textSecondary }}>Sınav tamamlandı. Sonuç öğretmen tarafından henüz paylaşılmadı.</p>}
+              {st.kind === "wait" && <p className="text-xs mt-3" style={{ color: COLORS.textSecondary }}>Sınav tamamlandı, yazılı cevaplar öğretmen tarafından puanlanıyor.</p>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Analiz (öğrenci / veli / öğretmen)                                   */
+/* ------------------------------------------------------------------ */
+
+// ---- Eşikler (ileride kolayca ayarlanabilir) ----
+const AN = {
+  WEAK_PCT: 50,          // bu yüzdenin altı "zayıf"
+  STRONG_PCT: 80,        // bu yüzdenin üstü "güçlü"
+  MIN_TOPIC_POINTS: 4,   // bir konu hakkında yorum yapmak için gereken en az toplam puan
+  DELTA_SUBJECT: 10,     // ders için düşüş/yükseliş sayılacak puan farkı
+  DELTA_TOPIC: 15,       // konu için (daha gürültülü) fark
+  CLASS_GAP: 10,         // sınıf ortalamasından bu kadar geride ise belirt
+  CLASS_MIN_N: 3,        // sınıf ortalaması için en az öğrenci sayısı
+  BLANK_RATE: 0.25,      // boş bırakma oranı uyarısı
+};
+const UNTAGGED = "Genel";
+
+const anPct = (earned, max) => (max > 0 ? (earned / max) * 100 : null);
+const anRound = (v) => (v === null || v === undefined ? null : Math.round(v));
+const anKey = (s) => String(s || "Diğer").trim().toLocaleLowerCase("tr");
+
+// Kronolojik girdilerden (her biri { pct, max }) eğilim hesaplar.
+// 4 ve üzeri girdide son 2 sınavın ortalaması, öncekilerin ortalamasıyla kıyaslanır; daha azında son sınav.
+function trendOf(entries, minDelta) {
+  if (entries.length < 2) return { direction: "none", delta: null, recent: null, previous: null };
+  const wmean = (list) => {
+    const w = list.reduce((s, e) => s + (e.max || 1), 0);
+    return list.reduce((s, e) => s + e.pct * (e.max || 1), 0) / w;
+  };
+  const recentList = entries.length >= 4 ? entries.slice(-2) : entries.slice(-1);
+  const prevList = entries.slice(0, entries.length - recentList.length);
+  const recent = wmean(recentList);
+  const previous = wmean(prevList);
+  const delta = recent - previous;
+  return { direction: delta <= -minDelta ? "down" : delta >= minDelta ? "up" : "flat", delta, recent, previous };
+}
+
+function analyzePerformance(rows) {
+  const examMap = new Map();
+  rows.forEach((r) => {
+    if (!examMap.has(r.assignment_id)) {
+      examMap.set(r.assignment_id, {
+        assignmentId: r.assignment_id, examId: r.exam_id, title: r.exam_title,
+        subject: String(r.subject || "Diğer").trim() || "Diğer", date: r.submitted_at,
+        earned: 0, max: 0, questionCount: Number(r.question_count) || 0,
+        answeredCount: Number(r.answered_count) || 0, endReason: r.end_reason || null, topics: [],
+      });
+    }
+    const e = examMap.get(r.assignment_id);
+    e.earned += Number(r.earned);
+    e.max += Number(r.max_points);
+    e.topics.push({
+      topic: r.topic || UNTAGGED, earned: Number(r.earned), max: Number(r.max_points),
+      classEarned: Number(r.class_earned), classMax: Number(r.class_max), classN: Number(r.class_n),
+    });
+  });
+  const exams = [...examMap.values()].sort((a, b) => Date.parse(a.date) - Date.parse(b.date));
+  exams.forEach((e) => { e.pct = anPct(e.earned, e.max); });
+
+  // Dersler
+  const subjMap = new Map();
+  exams.forEach((e) => {
+    const k = anKey(e.subject);
+    if (!subjMap.has(k)) subjMap.set(k, { subject: e.subject, exams: [], earned: 0, max: 0 });
+    const s = subjMap.get(k);
+    s.exams.push(e); s.earned += e.earned; s.max += e.max;
+  });
+  const subjects = [...subjMap.values()].map((s) => {
+    const series = s.exams.filter((e) => e.max > 0).map((e) => ({ title: e.title, date: e.date, pct: e.pct, max: e.max }));
+    return { subject: s.subject, examCount: s.exams.length, pct: anPct(s.earned, s.max), earned: s.earned, max: s.max, series, trend: trendOf(series, AN.DELTA_SUBJECT), topics: [] };
+  });
+
+  // Konular (ders içinde)
+  const topicMap = new Map();
+  exams.forEach((e) => {
+    e.topics.forEach((t) => {
+      if (t.topic === UNTAGGED || t.max <= 0) return;
+      const k = anKey(e.subject) + "||" + anKey(t.topic);
+      if (!topicMap.has(k)) topicMap.set(k, { subject: e.subject, topic: t.topic, entries: [], earned: 0, max: 0, classEarned: 0, classMax: 0, classEntries: 0 });
+      const tp = topicMap.get(k);
+      tp.entries.push({ title: e.title, date: e.date, pct: anPct(t.earned, t.max), max: t.max });
+      tp.earned += t.earned; tp.max += t.max;
+      if (t.classN >= AN.CLASS_MIN_N && t.classMax > 0) { tp.classEarned += t.classEarned; tp.classMax += t.classMax; tp.classEntries += 1; }
+    });
+  });
+  const topics = [...topicMap.values()].map((t) => {
+    const pct = anPct(t.earned, t.max);
+    const classPct = t.classMax > 0 ? anPct(t.classEarned, t.classMax) : null;
+    return { subject: t.subject, topic: t.topic, pct, earned: t.earned, max: t.max, examCount: t.entries.length, classPct, gap: classPct === null ? null : pct - classPct, series: t.entries, trend: trendOf(t.entries, AN.DELTA_TOPIC) };
+  });
+  topics.forEach((t) => {
+    const s = subjects.find((x) => anKey(x.subject) === anKey(t.subject));
+    if (s) s.topics.push(t);
+  });
+  subjects.forEach((s) => s.topics.sort((a, b) => a.pct - b.pct));
+  subjects.sort((a, b) => (a.pct ?? 101) - (b.pct ?? 101));
+
+  const totalEarned = exams.reduce((s, e) => s + e.earned, 0);
+  const totalMax = exams.reduce((s, e) => s + e.max, 0);
+  const last = exams.length ? exams[exams.length - 1] : null;
+  const prev = exams.length > 1 ? exams[exams.length - 2] : null;
+
+  return {
+    examCount: exams.length,
+    overallPct: anPct(totalEarned, totalMax),
+    last: last ? { title: last.title, subject: last.subject, pct: last.pct, change: prev && last.pct !== null && prev.pct !== null ? last.pct - prev.pct : null } : null,
+    exams, subjects, topics,
+    enoughForTrend: exams.length >= 2,
+  };
+}
+
+const rtxt = (v) => `%${Math.round(v)}`;
+
+// Kural tabanlı (yapay zekasız) yorumlar
+function buildInsights(a) {
+  const out = [];
+  const ok = (t) => t.max >= AN.MIN_TOPIC_POINTS;
+
+  a.topics.filter((t) => ok(t) && t.pct < AN.WEAK_PCT).sort((x, y) => x.pct - y.pct).slice(0, 5).forEach((t) => {
+    const cls = t.gap !== null && t.gap <= -AN.CLASS_GAP ? `, sınıf ortalamasının ${Math.round(-t.gap)} puan altında` : "";
+    out.push({ kind: "weak", severity: t.pct < 35 ? "high" : "medium", subject: t.subject, topic: t.topic, title: `${t.subject} · ${t.topic}`, detail: `Bu konuda başarı ${rtxt(t.pct)}${cls}. Konu tekrarı ve ek soru çözümü önerilir.` });
+  });
+
+  a.subjects.filter((s) => s.trend.direction === "down").forEach((s) => {
+    out.push({ kind: "decline", severity: "high", subject: s.subject, topic: null, title: `${s.subject} dersinde düşüş`, detail: `Önceki sınavlara göre ${rtxt(s.trend.previous)} → ${rtxt(s.trend.recent)} (${Math.round(s.trend.delta)} puan).` });
+  });
+  a.topics.filter((t) => ok(t) && t.trend.direction === "down").sort((x, y) => x.trend.delta - y.trend.delta).slice(0, 4).forEach((t) => {
+    out.push({ kind: "decline", severity: "medium", subject: t.subject, topic: t.topic, title: `${t.subject} · ${t.topic} konusunda düşüş`, detail: `${rtxt(t.trend.previous)} → ${rtxt(t.trend.recent)} (${Math.round(t.trend.delta)} puan).` });
+  });
+
+  const recentExams = a.exams.slice(-3);
+  const q = recentExams.reduce((s, e) => s + e.questionCount, 0);
+  const answered = recentExams.reduce((s, e) => s + Math.min(e.answeredCount, e.questionCount), 0);
+  if (recentExams.length && q > 0 && (q - answered) / q >= AN.BLANK_RATE) {
+    out.push({ kind: "attention", severity: "medium", subject: null, topic: null, title: "Çok soru boş bırakılıyor", detail: `Son ${recentExams.length} sınavda soruların %${Math.round(((q - answered) / q) * 100)}'i boş bırakılmış. Bilmediği soruda da işaretleme/yazma alışkanlığı kazandırılması önerilir.` });
+  }
+  const timeouts = a.exams.slice(-5).filter((e) => e.endReason === "timeout").length;
+  if (timeouts >= 2) {
+    out.push({ kind: "attention", severity: "medium", subject: null, topic: null, title: "Süre yetmiyor olabilir", detail: `Son sınavların ${timeouts} tanesi süre dolduğu için kapanmış. Zaman yönetimi çalışması faydalı olabilir.` });
+  }
+
+  a.subjects.filter((s) => s.trend.direction === "up").forEach((s) => {
+    out.push({ kind: "improve", severity: "low", subject: s.subject, topic: null, title: `${s.subject} dersinde yükseliş`, detail: `${rtxt(s.trend.previous)} → ${rtxt(s.trend.recent)} (+${Math.round(s.trend.delta)} puan).` });
+  });
+  a.topics.filter((t) => ok(t) && t.pct >= AN.STRONG_PCT).sort((x, y) => y.pct - x.pct).slice(0, 3).forEach((t) => {
+    out.push({ kind: "strength", severity: "low", subject: t.subject, topic: t.topic, title: `${t.subject} · ${t.topic}`, detail: `Güçlü konu: başarı ${rtxt(t.pct)}.` });
+  });
+  return out;
+}
+
+function Sparkline({ values, color = COLORS.blue, width = 110, height = 34 }) {
+  if (!values.length) return null;
+  const pad = 4;
+  const xs = values.map((_, i) => (values.length === 1 ? width / 2 : pad + (i * (width - pad * 2)) / (values.length - 1)));
+  const ys = values.map((v) => height - pad - (Math.max(0, Math.min(100, v)) / 100) * (height - pad * 2));
+  const pts = xs.map((x, i) => `${x.toFixed(1)},${ys[i].toFixed(1)}`).join(" ");
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ display: "block" }}>
+      {values.length > 1 && <polyline points={pts} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />}
+      {xs.map((x, i) => <circle key={i} cx={x} cy={ys[i]} r={i === values.length - 1 ? 3.5 : 2.5} fill={color} />)}
+    </svg>
+  );
+}
+
+function TrendBadge({ trend }) {
+  if (!trend || trend.direction === "none") return null;
+  const d = Math.round(trend.delta);
+  const cfg = trend.direction === "down" ? { t: `↓ ${d} puan`, c: COLORS.red } : trend.direction === "up" ? { t: `↑ +${d} puan`, c: COLORS.green } : { t: "→ sabit", c: COLORS.textSecondary };
+  return <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: `${cfg.c}15`, color: cfg.c }}>{cfg.t}</span>;
+}
+
+const pctColor = (p) => (p < 50 ? COLORS.red : p < 70 ? COLORS.orange : p < 80 ? COLORS.blue : COLORS.green);
+
+function InsightRow({ item }) {
+  const cfg = {
+    weak: { c: item.severity === "high" ? COLORS.red : COLORS.orange, icon: AlertTriangle },
+    decline: { c: item.severity === "high" ? COLORS.red : COLORS.orange, icon: AlertTriangle },
+    attention: { c: COLORS.orange, icon: AlertTriangle },
+    improve: { c: COLORS.green, icon: TrendingUp },
+    strength: { c: COLORS.green, icon: CheckCircle2 },
+  }[item.kind] || { c: COLORS.textSecondary, icon: AlertTriangle };
+  const Icon = cfg.icon;
+  return (
+    <div className="flex items-start gap-3 p-3.5 rounded-xl" style={{ background: `${cfg.c}0D` }}>
+      <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: `${cfg.c}18` }}>
+        <Icon size={16} color={cfg.c} />
+      </div>
+      <div className="min-w-0">
+        <div className="text-sm font-semibold" style={{ color: COLORS.text }}>{item.title}</div>
+        <div className="text-xs mt-0.5" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>{item.detail}</div>
+      </div>
+    </div>
+  );
+}
+
+function StudentAnalysisPanel({ studentId, studentName }) {
+  const [rows, setRows] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setRows(null);
+    setError("");
+    (async () => {
+      const { data, error: err } = await supabase.rpc("get_student_performance", { p_student_id: studentId });
+      if (cancelled) return;
+      if (err) setError("Analiz yüklenemedi: " + err.message);
+      else setRows(data || []);
+    })();
+    return () => { cancelled = true; };
+  }, [studentId]);
+
+  if (error) return <p className="text-xs" style={{ color: COLORS.red }}>{error}</p>;
+  if (rows === null) return <div className="py-14 text-center text-sm" style={{ color: COLORS.textSecondary }}>Analiz hazırlanıyor...</div>;
+
+  const a = analyzePerformance(rows);
+  if (a.examCount === 0) {
+    return (
+      <div className="rounded-2xl py-14 px-6 text-center text-sm" style={{ ...glassCard, color: COLORS.textSecondary, lineHeight: 1.7 }}>
+        {studentName} için henüz analiz yapılabilecek sonuçlanmış bir sınav yok.<br />
+        Sınav sonuçları paylaşıldıkça analiz burada görünecek.
+      </div>
+    );
+  }
+
+  const insights = buildInsights(a);
+  const attention = insights.filter((i) => i.kind === "weak" || i.kind === "decline" || i.kind === "attention");
+  const positive = insights.filter((i) => i.kind === "improve" || i.kind === "strength");
+  const weakest = attention.find((i) => i.kind === "weak");
+
+  return (
+    <div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6 stagger-grid">
+        <StatCard label="Genel başarı" value={`%${Math.round(a.overallPct)}`} icon={TrendingUp} color={COLORS.blue} />
+        <StatCard label="Değerlendirilen sınav" value={a.examCount} icon={BookOpen} color={COLORS.indigo} />
+        <StatCard
+          label={a.last && a.last.change !== null ? `Son sınav (${a.last.change > 0 ? "+" : ""}${Math.round(a.last.change)} puan)` : "Son sınav"}
+          value={a.last && a.last.pct !== null ? `%${Math.round(a.last.pct)}` : "—"}
+          icon={ClipboardCheck}
+          color={a.last && a.last.change !== null && a.last.change < 0 ? COLORS.orange : COLORS.green}
+        />
+        <StatCard label="Öncelikli konu" value={weakest ? weakest.topic : "—"} icon={AlertTriangle} color={weakest ? COLORS.red : COLORS.green} />
+      </div>
+
+      <div className="rounded-2xl p-6 mb-5" style={glassCard}>
+        <h3 className="text-sm font-semibold mb-4" style={{ color: COLORS.text }}>Dikkat edilecekler</h3>
+        {attention.length === 0 ? (
+          <p className="text-sm" style={{ color: COLORS.textSecondary }}>
+            {a.enoughForTrend ? "Şu an dikkat gerektiren bir konu ya da düşüş görünmüyor." : "Eğilim yorumu için en az iki sonuçlanmış sınav gerekir. Konu bazında dikkat gerektiren bir durum görünmüyor."}
+          </p>
+        ) : (
+          <div className="flex flex-col gap-2.5">{attention.map((it, i) => <InsightRow key={i} item={it} />)}</div>
+        )}
+      </div>
+
+      {positive.length > 0 && (
+        <div className="rounded-2xl p-6 mb-5" style={glassCard}>
+          <h3 className="text-sm font-semibold mb-4" style={{ color: COLORS.text }}>Olumlu gelişmeler</h3>
+          <div className="flex flex-col gap-2.5">{positive.map((it, i) => <InsightRow key={i} item={it} />)}</div>
+        </div>
+      )}
+
+      <h3 className="text-sm font-semibold mb-3 px-1" style={{ color: COLORS.text }}>Derslere göre</h3>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
+        {a.subjects.map((s) => (
+          <div key={s.subject} className="rounded-2xl p-5" style={glassCard}>
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div className="min-w-0">
+                <div className="text-base font-semibold truncate" style={{ color: COLORS.text }}>{s.subject}</div>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className="text-xs" style={{ color: COLORS.textSecondary }}>{s.examCount} sınav</span>
+                  <TrendBadge trend={s.trend} />
+                </div>
+              </div>
+              <div className="text-right flex-shrink-0">
+                <div className="text-xl font-semibold" style={{ color: pctColor(s.pct) }}>%{Math.round(s.pct)}</div>
+                <Sparkline values={s.series.map((p) => p.pct)} color={pctColor(s.pct)} />
+              </div>
+            </div>
+
+            {s.topics.length === 0 ? (
+              <p className="text-xs" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>Bu dersin soruları için konu bilgisi girilmemiş, konu bazında analiz yapılamıyor.</p>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {s.topics.map((t) => (
+                  <div key={t.topic}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-medium truncate" style={{ color: COLORS.text }}>{t.topic}{t.max < AN.MIN_TOPIC_POINTS ? " (az veri)" : ""}</span>
+                      <span className="flex items-center gap-2 flex-shrink-0">
+                        <TrendBadge trend={t.max >= AN.MIN_TOPIC_POINTS ? t.trend : null} />
+                        <span className="text-xs font-semibold" style={{ color: pctColor(t.pct) }}>%{Math.round(t.pct)}</span>
+                      </span>
+                    </div>
+                    <div className="relative w-full rounded-full h-2" style={{ background: "rgba(0,0,0,0.06)" }}>
+                      <div className="h-2 rounded-full" style={{ width: `${Math.min(100, t.pct)}%`, background: pctColor(t.pct) }} />
+                      {t.classPct !== null && (
+                        <div title={`Sınıf ortalaması %${Math.round(t.classPct)}`} style={{ position: "absolute", top: -3, left: `${Math.min(100, t.classPct)}%`, width: 2, height: 14, background: COLORS.text, opacity: 0.55, borderRadius: 1 }} />
+                      )}
+                    </div>
+                    {t.classPct !== null && <div className="text-xs mt-0.5" style={{ color: COLORS.textSecondary }}>Sınıf ortalaması %{Math.round(t.classPct)}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <p className="text-xs px-1 mb-2" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>
+        Bu analiz, sonuçlanmış sınavlara dayanan otomatik bir değerlendirmedir. Siyah çizgi sınıf ortalamasını gösterir (en az {AN.CLASS_MIN_N} öğrenci olan sınavlarda).
+        Tek bir sınavın sonucu kesin bir yargı için yeterli değildir, eğilimler birkaç sınav sonrasında daha güvenilir olur.
+      </p>
+    </div>
+  );
+}
+
+function StaffAnalysisTab({ students, classes, emptyNote }) {
+  const [classId, setClassId] = useState("all");
+  const [studentId, setStudentId] = useState("");
+
+  const classIds = Array.from(new Set(students.map((s) => s.classId).filter(Boolean)));
+  const classOptions = classes.filter((c) => classIds.includes(c.id)).sort((x, y) => x.name.localeCompare(y.name, "tr"));
+  const list = students
+    .filter((s) => classId === "all" || s.classId === classId)
+    .sort((x, y) => x.name.localeCompare(y.name, "tr"));
+  const selected = list.find((s) => s.id === studentId) || null;
+
+  if (students.length === 0) {
+    return (
+      <div className="rounded-2xl py-14 px-6 text-center text-sm" style={{ ...glassCard, color: COLORS.textSecondary, lineHeight: 1.7 }}>
+        {emptyNote || "Analiz görüntülenecek öğrenci yok."}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="rounded-2xl p-5 mb-5" style={glassCard}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {classOptions.length > 1 && (
+            <FormSelect label="Sınıf" value={classId} onChange={(e) => { setClassId(e.target.value); setStudentId(""); }}>
+              <option value="all">Tüm sınıflar</option>
+              {classOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </FormSelect>
+          )}
+          <FormSelect label="Öğrenci" value={selected ? selected.id : ""} onChange={(e) => setStudentId(e.target.value)}>
+            <option value="">Öğrenci seçin</option>
+            {list.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </FormSelect>
+        </div>
+      </div>
+      {selected ? (
+        <StudentAnalysisPanel key={selected.id} studentId={selected.id} studentName={selected.name} />
+      ) : (
+        <div className="rounded-2xl py-12 text-center text-sm" style={{ ...glassCard, color: COLORS.textSecondary }}>Analizini görmek için bir öğrenci seçin</div>
+      )}
+    </div>
   );
 }
 
@@ -6170,7 +6648,7 @@ export default function App() {
     );
   }
   if (currentUser.role === "counselor") {
-    const CN_TITLES = { overview: "Genel Bakış", classes: "Sınıflar", students: "Öğrenciler", coaching: "Koçlar" };
+    const CN_TITLES = { overview: "Genel Bakış", classes: "Sınıflar", students: "Öğrenciler", coaching: "Koçlar", analysis: "Öğrenci Analizi" };
     return (
       <Shell
         navItems={CN_NAV}
@@ -6185,15 +6663,16 @@ export default function App() {
         {cnActive === "classes" && <ClassesTab classes={classes} users={users} readOnly />}
         {cnActive === "students" && <AllStudentsTab users={users} classes={classes} studentTargets={studentTargets} />}
         {cnActive === "coaching" && <CoachingTab users={users} classes={classes} readOnly />}
+        {cnActive === "analysis" && <StaffAnalysisTab students={students} classes={classes} />}
       </Shell>
     );
   }
 
-    if (currentUser.role === "student") {
+      if (currentUser.role === "student") {
     const myClass = classes.find((c) => c.id === currentUser.classId);
     const myRecords = studentTargets.filter((st) => st.studentId === currentUser.id);
-    const STUDENT_NAV = [...PROGRESS_NAV, { id: "exams", label: "Sınavlarım", icon: BookOpen }];
-    const PROGRESS_TITLES = { overview: "Genel Bakış", targets: "Hedeflerim", summary: "Sınıf Özetim", exams: "Sınavlarım" };
+    const STUDENT_NAV = [...PROGRESS_NAV, { id: "analysis", label: "Analizim", icon: TrendingUp }, { id: "exams", label: "Sınavlarım", icon: BookOpen }];
+    const PROGRESS_TITLES = { overview: "Genel Bakış", targets: "Hedeflerim", summary: "Sınıf Özetim", analysis: "Analizim", exams: "Sınavlarım" };
     return (
       <>
         <Shell
@@ -6207,6 +6686,7 @@ export default function App() {
           {progressActive === "overview" && <ProgressOverviewTab person={currentUser} myRecords={myRecords} targets={targets} classLabel={myClass?.name} announcements={announcements} onOpenAnnouncement={setViewingAnnouncementId} />}
           {progressActive === "targets" && <TargetsListTab myRecords={myRecords} targets={targets} onSubmit={submitStudentData} />}
           {progressActive === "summary" && <ClassSummaryView students={[currentUser]} bookChecks={bookChecks} behaviorEvents={behaviorEvents} comments={studentComments} />}
+          {progressActive === "analysis" && <StudentAnalysisPanel studentId={currentUser.id} studentName={currentUser.name} />}
           {progressActive === "exams" && <StudentExamsTab />}
         </Shell>
         {viewingAnnouncementId && (
@@ -6215,15 +6695,16 @@ export default function App() {
       </>
     );
   }
-  if (currentUser.role === "parent") {
+      if (currentUser.role === "parent") {
     const child = users.find((u) => u.id === currentUser.childId);
     const childClass = child ? classes.find((c) => c.id === child.classId) : null;
     const myRecords = child ? studentTargets.filter((st) => st.studentId === child.id) : [];
-    const PROGRESS_TITLES = { overview: "Genel Bakış", targets: "Hedefler", summary: "Sınıf Özeti" };
+    const PARENT_NAV = [...PROGRESS_NAV, { id: "analysis", label: "Analiz", icon: TrendingUp }, { id: "exams", label: "Sınavlar", icon: BookOpen }];
+    const PROGRESS_TITLES = { overview: "Genel Bakış", targets: "Hedefler", summary: "Sınıf Özeti", analysis: "Analiz", exams: "Sınavlar" };
     return (
       <>
         <Shell
-          navItems={PROGRESS_NAV}
+          navItems={PARENT_NAV}
           active={progressActive}
           setActive={setProgressActive}
           user={{ name: currentUser.name, roleLabel: "Veli" }}
@@ -6234,6 +6715,8 @@ export default function App() {
           {child && progressActive === "overview" && <ProgressOverviewTab person={child} myRecords={myRecords} targets={targets} classLabel={childClass?.name} showLiveTag announcements={announcements} onOpenAnnouncement={setViewingAnnouncementId} />}
           {child && progressActive === "targets" && <TargetsListTab myRecords={myRecords} targets={targets} readOnly />}
           {child && progressActive === "summary" && <ClassSummaryView students={[child]} bookChecks={bookChecks} behaviorEvents={behaviorEvents} comments={studentComments} />}
+          {child && progressActive === "analysis" && <StudentAnalysisPanel studentId={child.id} studentName={child.name} />}
+          {child && progressActive === "exams" && <ParentExamsTab child={child} />}
         </Shell>
         {viewingAnnouncementId && (
           <AnnouncementViewerModal announcements={announcements} initialId={viewingAnnouncementId} onClose={() => setViewingAnnouncementId(null)} />
@@ -6250,7 +6733,7 @@ export default function App() {
     const navItems = isTeacher
     ? [...TC_NAV, { id: "seating", label: "Oturma Planı", icon: LayoutGrid }]
     : TC_NAV;
-  const TC_TITLES = { overview: "Genel Bakış", students: "Öğrencilerim", myclasses: "Sınıflarım", exams: "Sınavlar", targets: "Hedefler", verify: "Doğrulama", seating: "Oturma Planı"};
+  const TC_TITLES = { overview: "Genel Bakış", students: "Öğrencilerim", myclasses: "Sınıflarım", exams: "Sınavlar", analysis: "Öğrenci Analizi", targets: "Hedefler", verify: "Doğrulama", seating: "Oturma Planı"};
 
   return (
     <>
@@ -6296,6 +6779,7 @@ export default function App() {
           {tcActive === "targets" && <TargetsTab myTargets={myTargets} studentTargets={studentTargets} users={users} onAddClick={() => setShowTargetModal(true)} />}
           {tcActive === "verify" && <VerificationTab myTargets={myTargets} studentTargets={studentTargets} users={users} onVerify={verifyStudentTarget} />}
           {tcActive === "exams" && <ExamsTab currentUser={currentUser} classes={classes} students={students} />}
+          {tcActive === "analysis" && <StaffAnalysisTab students={pool} classes={classes} emptyNote="Analiz, sınıf rehber öğretmeni ya da koçu olduğunuz öğrenciler için görünür. Kendi sınavlarınızın sonuçlarına Sınavlar → Sonuçlar bölümünden ulaşabilirsiniz." />}
           {tcActive === "seating" && isTeacher && (
             myClass ? (
               <SeatingChartBoard cls={myClass} students={pool} initialChart={myClass.seatingChart} onSave={saveSeatingChart} onPrint={setPrintSeatingChart} />
