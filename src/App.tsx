@@ -93,6 +93,7 @@ function GlobalStyles() {
       @keyframes pulseSoft { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
       @keyframes shimmerGlow { 0%, 100% { box-shadow: 0 0 0 0 rgba(0,113,227,0.25); } 50% { box-shadow: 0 0 0 6px rgba(0,113,227,0); } }
 
+      #root { text-align: left; }
       .page-content { animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
       .modal-backdrop-anim { animation: fadeIn 0.2s ease both; }
       .modal-content-anim { animation: scaleIn 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
@@ -2884,6 +2885,7 @@ function ExamEditor({ examId, currentUser, onBack }) {
             </div>
               <div className="flex items-center gap-2">
               <ExamImportButton examId={id} existingCount={questions.length} nextPosition={nextPosition} onImported={() => loadQuestions(id)} />
+              <ExamTopicTagger examId={id} subject={form.subject} questions={questions} onApplied={() => loadQuestions(id)} />
               <button onClick={() => setEditingQ({ question: null })} className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.blue }}>
                 <Plus size={14} /> Soru Ekle
               </button>
@@ -5720,20 +5722,19 @@ function StudentAnalysisPanel({ studentId, studentName }) {
   const insights = buildInsights(a);
   const attention = insights.filter((i) => i.kind === "weak" || i.kind === "decline" || i.kind === "attention");
   const positive = insights.filter((i) => i.kind === "improve" || i.kind === "strength");
-  const weakest = attention.find((i) => i.kind === "weak");
 
   return (
     <div>
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6 stagger-grid">
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-6 stagger-grid">
         <StatCard label="Genel başarı" value={`%${Math.round(a.overallPct)}`} icon={TrendingUp} color={COLORS.blue} />
-        <StatCard label="Değerlendirilen sınav" value={a.examCount} icon={BookOpen} color={COLORS.indigo} />
+        <StatCard label="Sınav sayısı" value={a.examCount} icon={BookOpen} color={COLORS.indigo} />
         <StatCard
-          label={a.last && a.last.change !== null ? `Son sınav (${a.last.change > 0 ? "+" : ""}${Math.round(a.last.change)} puan)` : "Son sınav"}
+          label={a.last && a.last.change !== null ? `Son sınav ${a.last.change > 0 ? "+" : ""}${Math.round(a.last.change)}` : "Son sınav"}
           value={a.last && a.last.pct !== null ? `%${Math.round(a.last.pct)}` : "—"}
           icon={ClipboardCheck}
           color={a.last && a.last.change !== null && a.last.change < 0 ? COLORS.orange : COLORS.green}
         />
-        <StatCard label="Öncelikli konu" value={weakest ? weakest.topic : "—"} icon={AlertTriangle} color={weakest ? COLORS.red : COLORS.green} />
+        <StatCard label="Dikkat noktası" value={attention.length} icon={AlertTriangle} color={attention.length ? COLORS.red : COLORS.green} />
       </div>
 
       <div className="rounded-2xl p-6 mb-5" style={glassCard}>
@@ -5849,6 +5850,176 @@ function StaffAnalysisTab({ students, classes, emptyNote }) {
         <div className="rounded-2xl py-12 text-center text-sm" style={{ ...glassCard, color: COLORS.textSecondary }}>Analizini görmek için bir öğrenci seçin</div>
       )}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Konuları yapay zekayla belirleme                                     */
+/* ------------------------------------------------------------------ */
+
+// Yapay zekanın önerilerini, öğretmenin düzenleyeceği satırlara çevirir.
+// onlyUntagged: yalnızca konusu boş olan sorular listelenir (sunucudaki hedefleme ile aynı kural)
+function buildReviewRows(questions, tags, onlyUntagged) {
+  const byId = {};
+  (tags || []).forEach((t) => { byId[t.id] = t.topic; });
+  const rows = [];
+  questions.forEach((q, i) => {
+    const current = String(q.topic || "").trim();
+    if (onlyUntagged && current) return;
+    rows.push({ id: q.id, number: i + 1, text: String(q.text || ""), current, topic: byId[q.id] || "", suggested: !!byId[q.id] });
+  });
+  return rows;
+}
+
+// Kaydedilecek güncellemeler: boş olmayan ve mevcut değerden farklı konular
+function rowsToUpdates(rows) {
+  return rows
+    .map((r) => ({ id: r.id, topic: String(r.topic || "").replace(/\s+/g, " ").trim().slice(0, 60), current: r.current }))
+    .filter((r) => r.topic && r.topic !== r.current)
+    .map((r) => ({ id: r.id, topic: r.topic }));
+}
+
+function ExamTopicTaggerModal({ examId, subject, questions, onClose, onApplied }) {
+  const [onlyUntagged, setOnlyUntagged] = useState(true);
+  const [step, setStep] = useState("options");
+  const [loading, setLoading] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [error, setError] = useState("");
+  const [rows, setRows] = useState([]);
+
+  const untaggedCount = questions.filter((q) => !String(q.topic || "").trim()).length;
+  const targetCount = onlyUntagged ? untaggedCount : questions.length;
+
+  const start = async () => {
+    setError("");
+    setLoading(true);
+    const { data, error: err } = await supabase.functions.invoke("ai-exam-import", {
+      body: { mode: "tag", exam_id: examId, subject, only_untagged: onlyUntagged },
+    });
+    setLoading(false);
+    if (err) {
+      let msg = "Sunucu yanıt vermedi. Biraz sonra tekrar deneyin.";
+      try {
+        const b = await err.context.json();
+        if (b?.error) msg = b.error;
+      } catch (e) { /* gövde okunamadı */ }
+      return setError(msg);
+    }
+    if (data?.error) return setError(data.error);
+    setRows(buildReviewRows(questions, data.tags || [], onlyUntagged));
+    setStep("review");
+  };
+
+  const setRowTopic = (id, value) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, topic: value } : r)));
+
+  const apply = async () => {
+    const updates = rowsToUpdates(rows);
+    if (!updates.length) return setError("Kaydedilecek bir konu yok.");
+    setApplying(true);
+    setError("");
+    let failed = 0;
+    for (let i = 0; i < updates.length; i += 10) {
+      const chunk = updates.slice(i, i + 10);
+      const res = await Promise.all(chunk.map((u) => supabase.from("exam_questions").update({ topic: u.topic }).eq("id", u.id)));
+      failed += res.filter((r) => r.error).length;
+    }
+    setApplying(false);
+    if (failed) return setError(`${failed} soru güncellenemedi. Tekrar deneyin.`);
+    onApplied();
+  };
+
+  const suggestions = Array.from(new Set([...rows.map((r) => r.topic.trim()), ...questions.map((q) => String(q.topic || "").trim())].filter(Boolean)));
+  const readyCount = rowsToUpdates(rows).length;
+
+  return (
+    <ModalShell title="Konuları yapay zekayla belirle" onClose={onClose} width={720}>
+      {step === "options" && (
+        <>
+          <p className="text-xs mb-4" style={{ color: COLORS.textSecondary, lineHeight: 1.7 }}>
+            Yapay zeka, soruları okuyup her birine kısa bir konu adı önerir. Aynı dersin daha önce kullanılan konu adlarını tercih eder, böylece farklı sınavlardaki aynı konular
+            analizde tek başlık altında toplanır. Önerileri görüp düzeltebilir, sonra uygulayabilirsiniz.
+          </p>
+          {!String(subject || "").trim() && (
+            <p className="text-xs mb-4 px-3 py-2 rounded-xl" style={{ background: `${COLORS.orange}15`, color: COLORS.orange, lineHeight: 1.6 }}>
+              Sınav ayarlarında <b>Ders</b> alanı boş. Dersi girerseniz öneriler daha isabetli ve diğer sınavlarla tutarlı olur.
+            </p>
+          )}
+          <ExamToggle
+            checked={onlyUntagged}
+            onChange={setOnlyUntagged}
+            title="Yalnızca konusu olmayan soruları belirle"
+            desc={`Konusu olan ${questions.length - untaggedCount} soruya dokunulmaz. Kapalıysa tüm sorular yeniden belirlenir.`}
+          />
+          <p className="text-xs my-3" style={{ color: COLORS.textSecondary }}>{targetCount} soru için öneri istenecek.</p>
+          {error && <p className="text-xs mb-3" style={{ color: COLORS.red, lineHeight: 1.6 }}>{error}</p>}
+          <div className="flex gap-2">
+            <button onClick={onClose} disabled={loading} className="px-4 py-3 rounded-xl text-sm font-medium" style={{ color: COLORS.textSecondary }}>Vazgeç</button>
+            <button onClick={start} disabled={loading || targetCount === 0} className="flex-1 py-3 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.indigo, opacity: (loading || targetCount === 0) ? 0.6 : 1 }}>
+              {loading ? (
+                <span className="inline-flex items-center gap-2">
+                  <span className="spin-anim inline-block w-3.5 h-3.5 rounded-full border-2 border-white" style={{ borderTopColor: "transparent" }} />
+                  İnceleniyor…
+                </span>
+              ) : targetCount === 0 ? "Tüm soruların konusu var" : "Konuları Öner"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {step === "review" && (
+        <>
+          <p className="text-xs mb-3" style={{ color: COLORS.textSecondary, lineHeight: 1.7 }}>
+            Önerileri kontrol edin, gerekirse konu adını değiştirin. Boş bırakılan sorulara dokunulmaz.
+          </p>
+          <datalist id="tagger-topics">{suggestions.map((t) => <option key={t} value={t} />)}</datalist>
+          <div className="flex flex-col gap-2 mb-4">
+            {rows.map((r) => (
+              <div key={r.id} className="rounded-xl px-4 py-3" style={{ background: "rgba(0,0,0,0.03)" }}>
+                <p className="text-xs mb-2" style={{ color: COLORS.text, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                  <b style={{ color: COLORS.blue }}>{r.number}.</b> {r.text}
+                </p>
+                <input
+                  list="tagger-topics"
+                  value={r.topic}
+                  onChange={(e) => setRowTopic(r.id, e.target.value)}
+                  placeholder={r.suggested ? "" : "Konu girin (öneri üretilemedi)"}
+                  maxLength={60}
+                  className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                  style={{ border: `1px solid ${r.suggested ? `${COLORS.indigo}55` : "rgba(0,0,0,0.12)"}`, background: "#fff", color: COLORS.text }}
+                />
+              </div>
+            ))}
+          </div>
+          {error && <p className="text-xs mb-3" style={{ color: COLORS.red, lineHeight: 1.6 }}>{error}</p>}
+          <div className="flex gap-2">
+            <button onClick={() => { setStep("options"); setError(""); }} disabled={applying} className="px-4 py-3 rounded-xl text-sm font-medium" style={{ color: COLORS.textSecondary }}>Geri</button>
+            <button onClick={apply} disabled={applying || readyCount === 0} className="flex-1 py-3 rounded-xl text-sm font-semibold text-white" style={{ background: COLORS.green, opacity: (applying || readyCount === 0) ? 0.5 : 1 }}>
+              {applying ? "Kaydediliyor..." : `${readyCount} sorunun konusunu uygula`}
+            </button>
+          </div>
+        </>
+      )}
+    </ModalShell>
+  );
+}
+
+function ExamTopicTagger({ examId, subject, questions, onApplied }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)} disabled={!questions.length} className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold" style={{ color: COLORS.teal, background: `${COLORS.teal}15`, opacity: questions.length ? 1 : 0.5 }}>
+        Konuları Belirle
+      </button>
+      {open && (
+        <ExamTopicTaggerModal
+          examId={examId}
+          subject={subject}
+          questions={questions}
+          onClose={() => setOpen(false)}
+          onApplied={async () => { setOpen(false); await onApplied(); }}
+        />
+      )}
+    </>
   );
 }
 
