@@ -3186,6 +3186,144 @@ function downloadExamCsv(filename, rows) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/* ------------------------------------------------------------------ */
+/* Yazma puanlaması: yapay zeka önerileri                               */
+/* ------------------------------------------------------------------ */
+
+const WRITING_LANG_WORDS = [
+  "ingiliz", "english", "almanca", "german", "fransız", "fransiz", "french", "ispanyol", "spanish", "italyan",
+  "arapça", "arapca", "rusça", "rusca", "yabancı dil", "yabanci dil",
+  "türkçe", "turkce", "edebiyat", "türk dili", "turk dili", "dil ve anlatım", "dil ve anlatim",
+];
+// Sunucudaki tespitle aynı olmalıdır (yalnızca ekranda "otomatik" seçeneğinin yanındaki etiket için)
+function detectGradingMode(subject) {
+  const s = String(subject ?? "").toLocaleLowerCase("tr");
+  return WRITING_LANG_WORDS.some((w) => s.includes(w)) ? "language" : "content";
+}
+
+const AI_GRADE_CHUNK = 8;
+
+// Öğrencileri paketler halinde yapay zekaya gönderir. invoke dışarıdan verilir (test edilebilir).
+async function runAiGrading(opts) {
+  const { examId, attemptIds, mode, level, force, invoke, onProgress } = opts;
+  const chunks = [];
+  for (let i = 0; i < attemptIds.length; i += AI_GRADE_CHUNK) chunks.push(attemptIds.slice(i, i + AI_GRADE_CHUNK));
+  const results = [];
+  const errors = [];
+  const summary = { graded: 0, reused: 0, empty: 0, failed: 0 };
+  let done = 0;
+  for (const ids of chunks) {
+    const res = await invoke({
+      exam_id: examId,
+      attempt_ids: ids,
+      mode: mode && mode !== "auto" ? mode : undefined,
+      level: String(level || "").trim() || undefined,
+      force: !!force,
+    });
+    done += ids.length;
+    if (onProgress) onProgress(done);
+    if (res.error) {
+      errors.push(res.error);
+      if (res.status === 429) break; // kota doldu: devam etmenin anlamı yok
+      continue;
+    }
+    results.push(...(res.results || []));
+    (res.errors || []).forEach((e) => errors.push(e));
+    ["graded", "reused", "empty", "failed"].forEach((k) => { summary[k] += (res.summary && res.summary[k]) || 0; });
+  }
+  const uniqueErrors = Array.from(new Set(errors));
+  return { results, errors: uniqueErrors, summary, fatal: !results.length && uniqueErrors.length ? uniqueErrors[0] : null };
+}
+
+// Öneri kutusundaki bayrakların kullanıcıya gösterilen karşılığı
+function aiFlagInfo(flag) {
+  if (flag === "instruction_in_answer") return { text: "Cevap puanlayıcıya talimat içeriyor olabilir, dikkatle inceleyin", tone: "red" };
+  if (flag === "off_topic") return { text: "Konu dışı cevap", tone: "orange" };
+  if (flag === "gibberish") return { text: "Anlamsız metin", tone: "orange" };
+  if (flag === "empty") return { text: "Boş cevap", tone: "gray" };
+  return null;
+}
+
+async function invokeGradeFn(body) {
+  const { data, error } = await supabase.functions.invoke("ai-grade-writing", { body });
+  if (error) {
+    let msg = "Yapay zeka isteği başarısız oldu. Biraz sonra tekrar deneyin.";
+    let status = 0;
+    try {
+      status = error.context.status;
+      const b = await error.context.json();
+      if (b?.error) msg = b.error;
+    } catch (e) { /* gövde okunamadı */ }
+    return { error: msg, status };
+  }
+  if (data?.error) return { error: data.error };
+  return data;
+}
+
+const AI_CONF = { high: { t: "Yüksek güven", c: "green" }, medium: { t: "Orta güven", c: "orange" }, low: { t: "Düşük güven", c: "red" } };
+const aiToneColor = (tone) => (tone === "red" ? COLORS.red : tone === "orange" ? COLORS.orange : tone === "green" ? COLORS.green : COLORS.textSecondary);
+
+function AiGradeOptions({ subject, mode, setMode, level, setLevel, disabled }) {
+  const auto = detectGradingMode(subject);
+  const effective = mode === "auto" ? auto : mode;
+  const label = (m) => (m === "language" ? "Dil bilgisi odaklı" : "İçerik odaklı");
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
+      <FormSelect label="Değerlendirme biçimi" value={mode} onChange={(e) => setMode(e.target.value)} disabled={disabled}>
+        <option value="auto">Otomatik ({subject ? `${subject} → ` : ""}{label(auto)})</option>
+        <option value="content">İçerik odaklı (konu bilgisi)</option>
+        <option value="language">Dil bilgisi odaklı (İngilizce, Türkçe, edebiyat)</option>
+      </FormSelect>
+      {effective === "language" && (
+        <FormInput label="Beklenen düzey (opsiyonel)" placeholder="Örn. B1, 9. sınıf" value={level} onChange={(e) => setLevel(e.target.value)} maxLength={40} disabled={disabled} />
+      )}
+    </div>
+  );
+}
+
+function AiSuggestionBox({ s, max, applied, onUse }) {
+  if (!s) return null;
+  const score = Number(s.suggested_score ?? s.score);
+  const conf = AI_CONF[s.confidence] || AI_CONF.medium;
+  const flag = aiFlagInfo(s.flag);
+  const strengths = Array.isArray(s.strengths) ? s.strengths : [];
+  const issues = Array.isArray(s.issues) ? s.issues : [];
+  const corrections = Array.isArray(s.corrections) ? s.corrections : [];
+  return (
+    <div className="rounded-xl p-3 mt-2" style={{ background: `${COLORS.indigo}08`, border: `1px solid ${COLORS.indigo}25` }}>
+      <div className="flex flex-wrap items-center gap-2 mb-1.5">
+        <span className="text-xs font-semibold" style={{ color: COLORS.indigo }}>Yapay zeka önerisi</span>
+        <span className="text-sm font-bold" style={{ color: COLORS.text }}>{fmtScore(score)} / {fmtScore(max)}</span>
+        <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: `${aiToneColor(conf.c)}15`, color: aiToneColor(conf.c) }}>{conf.t}</span>
+        <span className="flex-1" />
+        <button onClick={onUse} disabled={applied} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ color: applied ? COLORS.green : "#fff", background: applied ? `${COLORS.green}15` : COLORS.indigo }}>
+          {applied ? "Uygulandı ✓" : "Öneriyi kullan"}
+        </button>
+      </div>
+      {flag && <p className="text-xs mb-1.5 px-2.5 py-1.5 rounded-lg" style={{ background: `${aiToneColor(flag.tone)}12`, color: aiToneColor(flag.tone), lineHeight: 1.5 }}>{flag.text}</p>}
+      {s.feedback && <p className="text-xs" style={{ color: COLORS.text, lineHeight: 1.6 }}>{s.feedback}</p>}
+      {strengths.length > 0 && (
+        <ul className="mt-1.5">{strengths.map((x, i) => <li key={i} className="text-xs" style={{ color: COLORS.green, lineHeight: 1.6 }}>✓ {x}</li>)}</ul>
+      )}
+      {issues.length > 0 && (
+        <ul className="mt-1">{issues.map((x, i) => <li key={i} className="text-xs" style={{ color: COLORS.orange, lineHeight: 1.6 }}>• {x}</li>)}</ul>
+      )}
+      {corrections.length > 0 && (
+        <div className="mt-2 rounded-lg px-3 py-2" style={{ background: "rgba(255,255,255,0.7)" }}>
+          <div className="text-xs font-semibold mb-1" style={{ color: COLORS.textSecondary }}>Hata düzeltmeleri</div>
+          {corrections.map((c, i) => (
+            <div key={i} className="text-xs" style={{ color: COLORS.text, lineHeight: 1.7 }}>
+              <span style={{ color: COLORS.red, textDecoration: "line-through" }}>{c.from}</span> → <b style={{ color: COLORS.green }}>{c.to}</b>
+              {c.rule ? <span style={{ color: COLORS.textSecondary }}> ({c.rule})</span> : null}
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="text-xs mt-1.5" style={{ color: COLORS.textSecondary }}>Bu bir öneridir; puanı siz belirlersiniz.</p>
+    </div>
+  );
+}
+
 function AttemptDetailModal({ exam, questions, keys, student, attemptRow, onClose, onSaved }) {
   const [answers, setAnswers] = useState(null);
   const [scores, setScores] = useState({});
@@ -3193,6 +3331,12 @@ function AttemptDetailModal({ exam, questions, keys, student, attemptRow, onClos
   const [error, setError] = useState("");
   const finished = attemptRow.status === "bitti";
   const autoScores = attemptRow.auto_scores || {};
+  const [ai, setAi] = useState({});
+  const [aiMode, setAiMode] = useState("auto");
+  const [aiLevel, setAiLevel] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [aiNote, setAiNote] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -3202,6 +3346,10 @@ function AttemptDetailModal({ exam, questions, keys, student, attemptRow, onClos
       const init = {};
       Object.entries(data.manual_scores || {}).forEach(([k, v]) => { init[k] = String(v); });
       setScores(init);
+      const { data: sg } = await supabase.rpc("get_attempt_ai_scores", { p_attempt_ids: [attemptRow.id] });
+      const m = {};
+      (sg || []).forEach((r) => { m[r.question_id] = r; });
+      setAi(m);
     })();
   }, []);
 
@@ -3230,6 +3378,33 @@ function AttemptDetailModal({ exam, questions, keys, student, attemptRow, onClos
 
   const letter = (i) => OPTION_LETTERS[i];
 
+  const askAi = async (force) => {
+    setAiError("");
+    setAiNote("");
+    setAiBusy(true);
+    const out = await runAiGrading({ examId: exam.id, attemptIds: [attemptRow.id], mode: aiMode, level: aiLevel, force, invoke: invokeGradeFn });
+    setAiBusy(false);
+    if (out.fatal) return setAiError(out.fatal);
+    const m = { ...ai };
+    out.results.forEach((r) => { m[r.question_id] = r; });
+    setAi(m);
+    if (out.errors.length) setAiError(out.errors.join(" "));
+    const s = out.summary;
+    const parts = [];
+    if (s.graded) parts.push(`${s.graded} cevap değerlendirildi`);
+    if (s.reused) parts.push(`${s.reused} öneri zaten hazırdı`);
+    if (s.empty) parts.push(`${s.empty} boş cevap`);
+    if (s.failed) parts.push(`${s.failed} cevap değerlendirilemedi`);
+    setAiNote(parts.join(" · "));
+  };
+  const isApplied = (q) => !!ai[q.id] && String(scores[q.id] ?? "").replace(",", ".").trim() === String(Number(ai[q.id].suggested_score));
+  const applyAll = () => {
+    const next = { ...scores };
+    openQs.forEach((q) => { if (ai[q.id]) next[q.id] = String(Number(ai[q.id].suggested_score)); });
+    setScores(next);
+  };
+  const aiCount = openQs.filter((q) => ai[q.id]).length;
+
   return (
     <ModalShell title={`${student.name} — Cevaplar`} onClose={onClose} width={760}>
       <div className="flex flex-wrap gap-2 mb-4">
@@ -3238,6 +3413,26 @@ function AttemptDetailModal({ exam, questions, keys, student, attemptRow, onClos
         <span className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: "rgba(0,0,0,0.06)", color: COLORS.textSecondary }}>Sekme çıkışı: {attemptRow.tab_switches}</span>
         {finished && <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: `${COLORS.blue}12`, color: COLORS.blue }}>Toplam: {fmtScore(autoSum + manualSum)} / {fmtScore(maxScore)}</span>}
       </div>
+
+      {answers !== null && finished && openQs.length > 0 && (
+        <div className="rounded-2xl p-4 mb-4" style={{ background: `${COLORS.indigo}08`, border: `1px solid ${COLORS.indigo}25` }}>
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <span className="text-sm font-semibold" style={{ color: COLORS.text }}>Yapay zeka puan önerisi</span>
+            <span className="text-xs" style={{ color: COLORS.textSecondary }}>Öneridir; puanı siz verir ve onaylarsınız.</span>
+          </div>
+          <AiGradeOptions subject={exam.subject} mode={aiMode} setMode={setAiMode} level={aiLevel} setLevel={setAiLevel} disabled={aiBusy} />
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={() => askAi(aiCount > 0)} disabled={aiBusy} className="px-3.5 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.indigo, opacity: aiBusy ? 0.7 : 1 }}>
+              {aiBusy ? "İnceleniyor…" : aiCount > 0 ? "Önerileri yeniden üret" : "Öneri al"}
+            </button>
+            {aiCount > 0 && (
+              <button onClick={applyAll} disabled={aiBusy} className="px-3.5 py-2 rounded-xl text-xs font-semibold" style={{ color: COLORS.indigo, background: `${COLORS.indigo}15` }}>Tüm önerileri puan kutularına uygula</button>
+            )}
+            {aiNote && <span className="text-xs" style={{ color: COLORS.textSecondary }}>{aiNote}</span>}
+          </div>
+          {aiError && <p className="text-xs mt-2" style={{ color: COLORS.red, lineHeight: 1.6 }}>{aiError}</p>}
+        </div>
+      )}
 
       {answers === null && <p className="text-sm py-8 text-center" style={{ color: COLORS.textSecondary }}>Yükleniyor...</p>}
 
@@ -3313,6 +3508,14 @@ function AttemptDetailModal({ exam, questions, keys, student, attemptRow, onClos
                         </label>
                       )}
                     </div>
+                    {finished && (
+                      <AiSuggestionBox
+                        s={ai[q.id]}
+                        max={Number(q.points)}
+                        applied={isApplied(q)}
+                        onUse={() => setScores({ ...scores, [q.id]: String(Number(ai[q.id].suggested_score)) })}
+                      />
+                    )}
                   </div>
                 )}
               </div>
@@ -3359,6 +3562,10 @@ function ExamResultsView({ exam, classes, students, onBack }) {
   const [error, setError] = useState("");
   const [detail, setDetail] = useState(null);
   const [confirmResetId, setConfirmResetId] = useState(null);
+  const [aiReady, setAiReady] = useState(new Set());
+  const [aiMode, setAiMode] = useState("auto");
+  const [aiLevel, setAiLevel] = useState("");
+  const [aiBatch, setAiBatch] = useState({ running: false, done: 0, total: 0, message: "", error: "" });
 
   const classNameOf = (id) => classes.find((c) => c.id === id)?.name || "?";
   const assignment = assignments.find((a) => a.class_id === classId);
@@ -3391,8 +3598,16 @@ function ExamResultsView({ exam, classes, students, onBack }) {
       .select("id, student_id, status, started_at, submitted_at, deadline, end_reason, tab_switches, logins, auto_scores, manual_scores, needs_manual, approved, total_score")
       .eq("assignment_id", asgId);
     if (err) setError("Sonuçlar yüklenemedi: " + err.message);
-    else { setAttempts(data || []); setError(""); }
+    else { setAttempts(data || []); setError(""); if (!silent) refreshAiReady(data || []); }
     setRefreshing(false);
+  };
+
+  const refreshAiReady = async (list) => {
+    if (!questions.some((q) => q.type === "open")) return;
+    const ids = list.filter((a) => a.status === "bitti").map((a) => a.id);
+    if (!ids.length) { setAiReady(new Set()); return; }
+    const { data } = await supabase.rpc("get_attempt_ai_scores", { p_attempt_ids: ids });
+    setAiReady(new Set((data || []).map((r) => r.attempt_id)));
   };
 
   useEffect(() => {
@@ -3420,6 +3635,22 @@ function ExamResultsView({ exam, classes, students, onBack }) {
   const notStartedCount = rows.filter((r) => !r.attempt).length;
   const needGradeCount = finishedRows.filter((r) => !r.attempt.approved).length;
   const avgPct = approvedRows.length && maxScore ? Math.round(approvedRows.reduce((s, r) => s + (Number(r.attempt.total_score) / maxScore) * 100, 0) / approvedRows.length) : null;
+
+  const hasOpenQ = questions.some((q) => q.type === "open");
+  const runBatch = async (force) => {
+    const targets = finishedRows.filter((r) => !r.attempt.approved).map((r) => r.attempt.id);
+    if (!targets.length) return;
+    setAiBatch({ running: true, done: 0, total: targets.length, message: "", error: "" });
+    const out = await runAiGrading({ examId: exam.id, attemptIds: targets, mode: aiMode, level: aiLevel, force, invoke: invokeGradeFn, onProgress: (d) => setAiBatch((b) => ({ ...b, done: d })) });
+    await refreshAiReady(attempts);
+    const s = out.summary;
+    const parts = [];
+    if (s.graded) parts.push(`${s.graded} cevap değerlendirildi`);
+    if (s.reused) parts.push(`${s.reused} cevap için öneri zaten hazırdı`);
+    if (s.empty) parts.push(`${s.empty} boş cevap (0 puan)`);
+    if (s.failed) parts.push(`${s.failed} cevap değerlendirilemedi`);
+    setAiBatch({ running: false, done: targets.length, total: targets.length, message: parts.join(" · "), error: out.fatal ? out.fatal : out.errors.join(" ") });
+  };
 
   const durationMin = (a) => (a.submitted_at && a.started_at ? Math.max(0, Math.round((Date.parse(a.submitted_at) - Date.parse(a.started_at)) / 60000)) : null);
 
@@ -3492,6 +3723,32 @@ function ExamResultsView({ exam, classes, students, onBack }) {
             <StatTile label="Ortalama" value={avgPct === null ? "—" : `%${avgPct}`} color={COLORS.teal} />
           </div>
 
+          {hasOpenQ && needGradeCount > 0 && (
+            <div className="rounded-2xl p-4 mb-3" style={{ background: `${COLORS.indigo}08`, border: `1px solid ${COLORS.indigo}25` }}>
+              <div className="flex flex-wrap items-center gap-2 mb-3">
+                <span className="text-sm font-semibold" style={{ color: COLORS.text }}>Yazma cevapları için yapay zeka puan önerisi</span>
+                <span className="text-xs" style={{ color: COLORS.textSecondary }}>Öneridir; puanı siz verir ve onaylarsınız.</span>
+              </div>
+              <AiGradeOptions subject={exam.subject} mode={aiMode} setMode={setAiMode} level={aiLevel} setLevel={setAiLevel} disabled={aiBatch.running} />
+              <div className="flex flex-wrap items-center gap-3">
+                <button onClick={() => runBatch(false)} disabled={aiBatch.running} className="px-3.5 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.indigo, opacity: aiBatch.running ? 0.7 : 1 }}>
+                  {aiBatch.running ? `İnceleniyor… (${aiBatch.done}/${aiBatch.total})` : `${needGradeCount} öğrenci için öneri hazırla`}
+                </button>
+                {aiReady.size > 0 && !aiBatch.running && (
+                  <button onClick={() => runBatch(true)} className="text-xs font-medium" style={{ color: COLORS.textSecondary }}>Önerileri yeniden üret</button>
+                )}
+                {aiBatch.message && <span className="text-xs" style={{ color: COLORS.textSecondary }}>{aiBatch.message}</span>}
+              </div>
+              {aiBatch.running && (
+                <div className="w-full rounded-full h-1.5 mt-3" style={{ background: "rgba(0,0,0,0.06)" }}>
+                  <div className="h-1.5 rounded-full" style={{ width: `${aiBatch.total ? Math.round((aiBatch.done / aiBatch.total) * 100) : 0}%`, background: COLORS.indigo, transition: "width 0.3s" }} />
+                </div>
+              )}
+              {aiBatch.error && <p className="text-xs mt-2" style={{ color: COLORS.red, lineHeight: 1.6 }}>{aiBatch.error}</p>}
+              <p className="text-xs mt-2" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>Hazırlanan öneriler, her öğrencinin "Puanla" penceresinde görünür. Aynı cevap için öneri bir kez hazırlanır, tekrar maliyet doğurmaz.</p>
+            </div>
+          )}
+
           <div className="flex items-center gap-2 mb-3">
             <button onClick={() => assignment && loadAttempts(assignment.id)} disabled={refreshing} className="px-3.5 py-2 rounded-xl text-xs font-semibold" style={{ color: COLORS.blue, background: `${COLORS.blue}12`, opacity: refreshing ? 0.6 : 1 }}>
               {refreshing ? "Yenileniyor..." : "Yenile"}
@@ -3532,6 +3789,9 @@ function ExamResultsView({ exam, classes, students, onBack }) {
                   )}
                   {scoreText && <span className="text-sm font-semibold" style={{ color: COLORS.text }}>{scoreText}</span>}
                   <span className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: `${badge.color}18`, color: badge.color }}>{badge.label}</span>
+                  {attempt && attempt.status === "bitti" && !attempt.approved && aiReady.has(attempt.id) && (
+                    <span className="text-xs font-medium px-2.5 py-1 rounded-full" style={{ background: `${COLORS.indigo}15`, color: COLORS.indigo }}>Öneri hazır</span>
+                  )}
                   {attempt && (
                     confirmResetId === attempt.id ? (
                       <div className="flex items-center gap-1.5">
@@ -5644,6 +5904,168 @@ function buildInsights(a) {
   return out;
 }
 
+/* ------------------------------------------------------------------ */
+/* Yapay zeka yorumu kartı                                              */
+/* ------------------------------------------------------------------ */
+
+// Yorum kartının hangi durumda olduğunu belirler (görünüm kararı tek yerde, test edilebilir)
+function aiCardView(info, canGenerate) {
+  if (info && info.available === false) return { kind: "hidden" };
+  const has = !!(info && info.has_narrative);
+  const stale = !!(info && info.stale);
+  if (has && !stale) return { kind: "fresh", button: null };
+  if (has && stale) return { kind: "stale", button: "Yorumu güncelle" };
+  if (canGenerate) return { kind: "empty", button: "Yapay zeka yorumu oluştur" };
+  return { kind: "blocked", button: null };
+}
+
+function AiAnalysisCard({ studentId, canGenerate }) {
+  const [info, setInfo] = useState(null);
+  const [narrative, setNarrative] = useState(null);
+  const [meta, setMeta] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setInfo(null);
+    setNarrative(null);
+    setMeta(null);
+    setMessage("");
+    setError("");
+    (async () => {
+      const { data, error: err } = await supabase.rpc("get_student_analysis", { p_student_id: studentId });
+      if (cancelled) return;
+      setLoading(false);
+      if (err) { setError("Yorum durumu alınamadı."); return; }
+      setInfo(data);
+      if (data && data.has_narrative) {
+        setNarrative(data.narrative);
+        setMeta({ generated_at: data.generated_at, stale: !!data.stale });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [studentId]);
+
+  const generate = async () => {
+    setError("");
+    setMessage("");
+    setGenerating(true);
+    const { data, error: err } = await supabase.functions.invoke("ai-student-analysis", { body: { student_id: studentId } });
+    setGenerating(false);
+    if (err) {
+      let msg = "Yorum hazırlanamadı. Biraz sonra tekrar deneyin.";
+      try {
+        const b = await err.context.json();
+        if (b?.error) msg = b.error;
+      } catch (e) { /* gövde okunamadı */ }
+      return setError(msg);
+    }
+    if (data?.error) return setError(data.error);
+    if (data?.skipped) {
+      setNarrative(null);
+      setMeta(null);
+      setInfo((i) => ({ ...(i || {}), available: true, has_narrative: false, stale: false }));
+      return setMessage(data.message || "Yorum hazırlanmadı.");
+    }
+    setNarrative(data.narrative);
+    setMeta(data.meta);
+    setInfo((i) => ({ ...(i || {}), available: true, has_narrative: true, stale: !!data.meta.stale }));
+    if (data.meta.cooldown) setMessage("Bu öğrenci için yorum yakın zamanda güncellendi. Yeni bir yorum için biraz beklemeniz gerekiyor.");
+    else if (data.meta.limited) setMessage("Günlük yapay zeka kotası doldu, en son hazırlanan yorum gösteriliyor.");
+  };
+
+  if (loading) return null;
+  const view = aiCardView(info, canGenerate);
+  if (view.kind === "hidden") return null;
+
+  return (
+    <div className="rounded-2xl p-6 mb-5" style={{ ...glassCard, border: `1px solid ${COLORS.indigo}30` }}>
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold" style={{ color: COLORS.text }}>Yapay zeka yorumu</h3>
+          <span className="text-xs font-medium px-2 py-0.5 rounded-full" style={{ background: `${COLORS.indigo}15`, color: COLORS.indigo }}>Otomatik</span>
+        </div>
+        {view.button && (
+          <button onClick={generate} disabled={generating} className="px-3.5 py-2 rounded-xl text-xs font-semibold text-white" style={{ background: COLORS.indigo, opacity: generating ? 0.7 : 1 }}>
+            {generating ? (
+              <span className="inline-flex items-center gap-2">
+                <span className="spin-anim inline-block w-3 h-3 rounded-full border-2 border-white" style={{ borderTopColor: "transparent" }} />
+                İnceleniyor…
+              </span>
+            ) : view.button}
+          </button>
+        )}
+      </div>
+
+      {error && <p className="text-xs mb-3" style={{ color: COLORS.red, lineHeight: 1.6 }}>{error}</p>}
+      {message && <p className="text-xs mb-3 px-3 py-2 rounded-xl" style={{ background: `${COLORS.orange}12`, color: COLORS.text, lineHeight: 1.6 }}>{message}</p>}
+
+      {view.kind === "blocked" && !message && (
+        <p className="text-sm" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>
+          Yorum, en az iki sonuçlanmış sınav olduğunda ve dikkat gerektiren bir durum görüldüğünde hazırlanır.
+        </p>
+      )}
+      {view.kind === "empty" && !message && (
+        <p className="text-sm" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>
+          Sonuçlara dayanarak kısa bir değerlendirme ve çalışma önerisi hazırlanabilir. Yorum bir kez hazırlanıp saklanır, yeni sonuç gelene kadar yeniden hazırlanmaz.
+        </p>
+      )}
+
+      {narrative && (
+        <div>
+          {view.kind === "stale" && (
+            <p className="text-xs mb-3 px-3 py-2 rounded-xl" style={{ background: `${COLORS.orange}12`, color: COLORS.orange, lineHeight: 1.6 }}>
+              Yeni sınav sonuçları geldi, bu yorum güncel olmayabilir.
+            </p>
+          )}
+          <p className="text-sm mb-4" style={{ color: COLORS.text, lineHeight: 1.7 }}>{narrative.summary}</p>
+
+          {narrative.priorities && narrative.priorities.length > 0 && (
+            <div className="mb-4">
+              <div className="text-xs font-semibold mb-2" style={{ color: COLORS.textSecondary }}>ÖNCELİKLİ ALANLAR</div>
+              <div className="flex flex-col gap-2">
+                {narrative.priorities.map((p, i) => (
+                  <div key={i} className="rounded-xl px-4 py-3" style={{ background: "rgba(0,0,0,0.03)" }}>
+                    <div className="text-sm font-semibold" style={{ color: COLORS.text }}>{p.subject}{p.topic ? ` · ${p.topic}` : ""}</div>
+                    <div className="text-xs mt-0.5" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>{p.why}</div>
+                    <div className="text-xs mt-1" style={{ color: COLORS.indigo, lineHeight: 1.6 }}>→ {p.suggestion}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {narrative.weekly_plan && narrative.weekly_plan.length > 0 && (
+            <div className="mb-4">
+              <div className="text-xs font-semibold mb-2" style={{ color: COLORS.textSecondary }}>HAFTALIK ÇALIŞMA ÖNERİLERİ</div>
+              <ul className="flex flex-col gap-1.5">
+                {narrative.weekly_plan.map((w, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm" style={{ color: COLORS.text, lineHeight: 1.6 }}>
+                    <CheckCircle2 size={15} color={COLORS.green} style={{ marginTop: 3, flexShrink: 0 }} />
+                    <span>{w}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {narrative.encouragement && (
+            <p className="text-sm mb-3 px-4 py-3 rounded-xl" style={{ background: `${COLORS.green}10`, color: COLORS.text, lineHeight: 1.6 }}>{narrative.encouragement}</p>
+          )}
+
+          <p className="text-xs" style={{ color: COLORS.textSecondary, lineHeight: 1.6 }}>
+            Yapay zeka tarafından hazırlanmıştır{meta && meta.generated_at ? ` (${fmtExamDate(meta.generated_at)})` : ""}. Sınav sonuçlarına dayanan otomatik bir değerlendirmedir, öğretmeninizle birlikte değerlendirmeniz önerilir.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Sparkline({ values, color = COLORS.blue, width = 110, height = 34 }) {
   if (!values.length) return null;
   const pad = 4;
@@ -5747,7 +6169,7 @@ function StudentAnalysisPanel({ studentId, studentName }) {
           <div className="flex flex-col gap-2.5">{attention.map((it, i) => <InsightRow key={i} item={it} />)}</div>
         )}
       </div>
-
+      <AiAnalysisCard studentId={studentId} canGenerate={a.examCount >= 2 && attention.length > 0} />
       {positive.length > 0 && (
         <div className="rounded-2xl p-6 mb-5" style={glassCard}>
           <h3 className="text-sm font-semibold mb-4" style={{ color: COLORS.text }}>Olumlu gelişmeler</h3>
